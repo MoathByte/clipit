@@ -37,10 +37,12 @@ if (!env.TAURI_SIGNING_PRIVATE_KEY) {
 }
 env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD ??= "";
 
-const run = (cmd, args) => execFileSync(cmd, args, { cwd: root, env, stdio: "inherit", shell: process.platform === "win32" });
+// npm is a .cmd script on Windows and needs a shell; everything else runs directly,
+// so paths with spaces are passed safely.
+const run = (cmd, args, shell = false) => execFileSync(cmd, args, { cwd: root, env, stdio: "inherit", shell });
 
 console.log(`Building Clipit ${version}…`);
-run("npm", ["run", "build"]);
+run("npm run build", [], true);
 
 const target = process.env.CARGO_TARGET_DIR || join(root, "src-tauri", "target");
 const nsis = join(target, "release", "bundle", "nsis");
