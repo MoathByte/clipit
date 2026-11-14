@@ -1,0 +1,20 @@
+{
+  "name": "clipit",
+  "private": true,
+  "version": "0.9.0",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri",
+    "release": "node scripts/release.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "description": "A lightweight game clipper and clip library for Windows",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MoathByte/clipit.git"
+  }
+}

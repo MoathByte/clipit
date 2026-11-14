@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clipit</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="ov-closed">
+  <!-- Overlay backdrop: a snapshot of the screen behind Clipit, blurred in -->
+  <div class="backdrop" id="backdrop">
+    <img id="bd-img" alt="">
+    <img id="bd-blur" alt="">
+    <div class="bd-tint"></div>
+    <div class="bd-vignette"></div>
+  </div>
+
+  <div class="shell" id="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" class="brand-mark" aria-hidden="true">
+        <path d="M3 9V6.5A3.5 3.5 0 0 1 6.5 3H9M15 21h2.5a3.5 3.5 0 0 0 3.5-3.5V15"/>
+        <circle class="dot" cx="12" cy="12" r="3.6"/>
+      </svg>
+      <span>Clipit</span>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item" data-nav="home">
+        <svg viewBox="0 0 24 24"><path d="M3 11.5 12 4l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+        Home
+      </button>
+      <button class="nav-item" data-nav="all">
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM10 9v6l5-3z"/></svg>
+        All clips <span class="count" id="all-count"></span>
+      </button>
+      <button class="nav-item" data-nav="favorites">
+        <svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg>
+        Favorites <span class="count" id="fav-count"></span>
+      </button>
+      <button class="nav-item" data-nav="review">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h10M4 18h7M16 16l2 2 4-4"/></svg>
+        Review <span class="count pill" id="review-count"></span>
+      </button>
+    </nav>
+
+    <div class="nav-label">Games</div>
+    <div class="games-list" id="games-list"></div>
+
+    <div class="sidebar-bottom">
+      <div class="update-card hidden" id="update-card">
+        <span id="update-text">Update ready</span>
+        <button class="btn sm primary" id="update-btn">Restart to update</button>
+      </div>
+      <div class="recorder idle" id="rec-widget">
+        <div class="rec-head"><span class="rec-label" id="rec-text">Starting</span><span class="rec-src" id="rec-src"></span></div>
+        <div class="rec-meter" id="rec-meter" title=""><span id="rec-meter-fill"></span></div>
+        <div class="rec-actions">
+          <button class="btn sm" id="rec-save" title="Save the last moments as a clip">
+            <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg> <span id="rec-save-label">Save clip</span>
+          </button>
+          <button class="btn sm rec-btn" id="rec-toggle" title="Start or stop a recording">
+            <span class="rec-icon"></span> <span id="rec-toggle-label">Record</span>
+          </button>
+        </div>
+      </div>
+      <div class="hotkey-hint" id="hotkey-chip"></div>
+      <button class="nav-item" data-nav="settings">
+        <svg viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+        Settings
+      </button>
+    </div>
+  </aside>
+
+  <main class="main" id="main"></main>
+
+  <!-- Clip player -->
+  <div class="player hidden" id="player" role="dialog" aria-modal="true">
+    <div class="player-top">
+      <div class="player-title">
+        <div class="player-name-row" id="p-name-row">
+          <div class="player-game" id="p-game"></div>
+          <button class="icon-btn" id="p-rename" title="Rename (F2)">
+            <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16zM14 6l4 4"/></svg>
+          </button>
+        </div>
+        <form class="rename-form hidden" id="p-rename-form">
+          <input id="p-rename-input" type="text" spellcheck="false" maxlength="180" aria-label="Clip name">
+          <button class="btn primary" type="submit">Save</button>
+          <button class="btn ghost" type="button" id="p-rename-cancel">Cancel</button>
+        </form>
+        <div class="player-sub" id="p-sub"></div>
+      </div>
+      <div class="player-actions">
+        <button class="btn ghost fav-toggle" id="p-fav" title="Favorite (F)">
+          <svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg> <span>Favorite</span>
+        </button>
+        <button class="btn ghost hidden" id="p-kills" title="Count your kills in this clip (reads the saved file)">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg> <span>Count kills</span>
+        </button>
+        <button class="btn ghost" id="p-copy" title="Copy the file — paste it anywhere with Ctrl+V">
+          <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg> Copy
+        </button>
+        <button class="btn ghost" id="p-reveal" title="Show in File Explorer">
+          <svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></svg> Show in folder
+        </button>
+        <button class="btn danger" id="p-delete" title="Move to Recycle Bin (Del)">
+          <svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13"/></svg> Delete
+        </button>
+        <button class="btn primary" id="p-edit" title="Trim, crop and compress (E)">
+          <svg viewBox="0 0 24 24"><path d="M6 3v12a3 3 0 0 0 3 3h12M3 6h12a3 3 0 0 1 3 3v12"/></svg> Edit &amp; Send
+        </button>
+        <button class="btn icon" id="p-close" title="Close (Esc)">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="player-body">
+      <div class="player-main">
+        <div class="player-stage">
+          <button class="stage-nav" id="p-prev" title="Previous clip (↑)">
+            <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+          </button>
+          <div class="video-col" id="video-col">
+            <div class="video-wrap paused" id="video-wrap">
+              <video id="p-video" preload="metadata"></video>
+              <button class="big-play" id="vc-big" title="Play (Space)" aria-label="Play">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              </button>
+              <div class="crop-layer hidden" id="crop-layer"><div class="crop-box" id="crop-box"><span class="crop-hint">Drag to move</span></div></div>
+            </div>
+            <div class="vc" id="vc">
+              <div class="vc-scrub" id="vc-scrub" title="">
+                <canvas class="vc-wave" id="vc-wave"></canvas>
+                <canvas class="vc-wave played" id="vc-wave-played"></canvas>
+                <div class="vc-head" id="vc-head"></div>
+                <div class="vc-tip hidden" id="vc-tip"></div>
+              </div>
+              <div class="vc-row">
+                <button class="vc-btn" id="vc-play" title="Play / pause (Space)" aria-label="Play">
+                  <svg viewBox="0 0 24 24" class="fill ic-play"><path d="M8 5v14l11-7z"/></svg>
+                  <svg viewBox="0 0 24 24" class="fill ic-pause"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                </button>
+                <div class="vc-time"><b id="vc-cur">0:00</b><span class="sep">/</span><span id="vc-dur">0:00</span></div>
+                <div class="vc-spacer"></div>
+                <button class="vc-btn vc-speed" id="vc-speed" title="Playback speed">1×</button>
+                <button class="vc-btn" id="vc-mute" title="Mute (M)" aria-label="Mute">
+                  <svg viewBox="0 0 24 24" class="ic-vol"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>
+                  <svg viewBox="0 0 24 24" class="ic-muted"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9.5l5 5M22 9.5l-5 5"/></svg>
+                </button>
+                <input type="range" class="vc-vol" id="vc-vol" min="0" max="1" step="0.01" aria-label="Volume">
+                <button class="vc-btn" id="vc-fs" title="Fullscreen (double-click the video)" aria-label="Fullscreen">
+                  <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <button class="stage-nav" id="p-next" title="Next clip (↓)">
+            <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></svg>
+          </button>
+        </div>
+
+        <div class="trim hidden" id="trim">
+          <div class="trim-track" id="trim-track">
+            <canvas class="trim-wave" id="trim-wave"></canvas>
+            <div class="trim-dim left" id="trim-dim-l"></div>
+            <div class="trim-dim right" id="trim-dim-r"></div>
+            <div class="trim-range" id="trim-range"></div>
+            <div class="trim-handle" id="trim-h-start" title="Drag to set the start (I)"></div>
+            <div class="trim-handle" id="trim-h-end" title="Drag to set the end (O)"></div>
+            <div class="trim-playhead" id="trim-playhead"></div>
+          </div>
+        </div>
+
+        <div class="review-bar hidden" id="review-bar">
+          <div class="rv-progress"><b id="rv-pos"></b><span id="rv-stats"></span></div>
+          <div class="rv-actions">
+            <button class="btn" id="rv-undo" title="Undo last (Z)">Undo <kbd>Z</kbd></button>
+            <button class="btn" id="rv-skip" title="Decide later (S)">Skip <kbd>S</kbd></button>
+            <button class="btn danger" id="rv-delete" title="Move to Recycle Bin (D)">Delete <kbd>D</kbd></button>
+            <button class="btn keep" id="rv-keep" title="Keep it (K)">Keep <kbd>K</kbd></button>
+          </div>
+        </div>
+
+        <div class="player-hint" id="player-hint"></div>
+      </div>
+
+      <aside class="editor hidden" id="editor">
+        <section>
+          <div class="ed-title">Trim</div>
+          <div class="trim-times">
+            <button class="time-btn" id="ed-set-start" title="Set start to the current position (I)"><span>Start</span><b id="ed-start">0:00.0</b></button>
+            <button class="time-btn" id="ed-set-end" title="Set end to the current position (O)"><span>End</span><b id="ed-end">0:00.0</b></button>
+          </div>
+          <div class="ed-row muted"><span id="ed-length"></span><button class="link" id="ed-trim-reset">Reset</button></div>
+        </section>
+
+        <section>
+          <div class="ed-title">Crop</div>
+          <div class="chips" id="ed-aspect">
+            <button class="chip" data-aspect="">Original</button>
+            <button class="chip" data-aspect="9:16">9:16</button>
+            <button class="chip" data-aspect="1:1">1:1</button>
+            <button class="chip" data-aspect="4:5">4:5</button>
+            <button class="chip" data-aspect="4:3">4:3</button>
+          </div>
+        </section>
+
+        <section>
+          <div class="ed-title">Compress</div>
+          <label class="ed-field">Size limit
+            <select class="select" id="ed-size">
+              <option value="10">Discord · 10 MB</option>
+              <option value="50">Discord Nitro Basic · 50 MB</option>
+              <option value="500">Discord Nitro · 500 MB</option>
+              <option value="25">25 MB</option>
+              <option value="custom">Custom…</option>
+              <option value="">No limit (best quality)</option>
+            </select>
+          </label>
+          <label class="ed-field hidden" id="ed-custom-wrap">Custom size (MB)
+            <input class="select" id="ed-custom" type="number" min="1" max="4000" step="1" value="15">
+          </label>
+          <div class="ed-grid">
+            <label class="ed-field">Resolution
+              <select class="select" id="ed-res">
+                <option value="">Auto</option>
+                <option value="1080">1080p</option>
+                <option value="720">720p</option>
+                <option value="480">480p</option>
+              </select>
+            </label>
+            <label class="ed-field">Frame rate
+              <select class="select" id="ed-fps">
+                <option value="">Original</option>
+                <option value="60">60 fps</option>
+                <option value="30">30 fps</option>
+              </select>
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" id="ed-audio" checked> Include audio</label>
+          <div class="estimate" id="ed-estimate"></div>
+        </section>
+
+        <div class="ed-actions" id="ed-actions">
+          <button class="btn primary wide" id="ed-send" title="Compress, then copy the file so you can paste it into Discord">
+            <svg viewBox="0 0 24 24"><path d="M4 12l16-8-6 16-3-7z"/></svg> Compress &amp; Copy
+          </button>
+          <button class="btn wide" id="ed-save">Save only</button>
+        </div>
+
+        <div class="ed-progress hidden" id="ed-progress">
+          <div class="bar"><div class="bar-fill" id="ed-bar"></div></div>
+          <div class="ed-row"><span id="ed-progress-text">Starting…</span><button class="link" id="ed-cancel">Cancel</button></div>
+        </div>
+
+        <div class="ed-result hidden" id="ed-result">
+          <div class="ed-result-title" id="ed-result-title"></div>
+          <div class="muted" id="ed-result-sub"></div>
+          <div class="ed-result-grid">
+            <button class="btn" id="ed-result-open">Open edit</button>
+            <button class="btn fav-toggle" id="ed-result-fav">Favorite edit</button>
+            <button class="btn" id="ed-result-copy">Copy again</button>
+            <button class="btn ghost" id="ed-result-reveal">Show in folder</button>
+          </div>
+          <button class="btn danger wide" id="ed-result-del-orig" title="Move the original to the Recycle Bin and keep only the edit">Delete original to save space</button>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <!-- Confirm dialog -->
+  <div class="modal hidden" id="confirm">
+    <div class="modal-card">
+      <h3 id="confirm-title"></h3>
+      <p id="confirm-text"></p>
+      <div class="modal-actions">
+        <button class="btn ghost" id="confirm-no">Cancel</button>
+        <button class="btn danger" id="confirm-yes">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- First-run setup -->
+  <div class="wizard hidden" id="wizard" role="dialog" aria-modal="true" aria-labelledby="wiz-title">
+    <div class="wiz-card">
+      <div class="wiz-dots" id="wiz-dots"></div>
+      <div class="wiz-body" id="wiz-body"></div>
+      <div class="wiz-nav">
+        <button class="btn ghost" id="wiz-back">Back</button>
+        <button class="btn primary" id="wiz-next">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

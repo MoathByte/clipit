@@ -1,0 +1,49 @@
+[package]
+name = "clipit"
+version = "0.9.0"
+description = "A lightweight game clipper and clip library"
+authors = ["MoathByte"]
+license = "MIT"
+repository = "https://github.com/MoathByte/clipit"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["sync", "macros"] }
+notify = "6"
+trash = "5"
+clipboard-win = "5"
+winreg = "0.52"
+tiny_http = "0.12"
+# Same versions Tauri/wry already use — needed to lower WebView2 memory while hidden.
+webview2-com = "=0.39.1"
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Threading", "Win32_System_Performance", "Win32_System_SystemInformation", "Win32_System_Pipes",
+    "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Media_Audio",
+] }
+# WASAPI desktop + microphone capture (same windows-rs version as above).
+wasapi = "0.27"
+# Map/agent recognition in saved VALORANT clips: reference PNGs + FFT correlation.
+image = { version = "0.25", default-features = false, features = ["png"] }
+rustfft = "6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[profile.release]
+opt-level = 3  # the map matcher is FFT-heavy
+lto = true
+codegen-units = 1
+strip = true
