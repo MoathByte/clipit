@@ -5,6 +5,7 @@ mod art;
 mod capture;
 mod config;
 mod export;
+mod keys;
 mod library;
 mod media;
 mod overlay;
@@ -467,17 +468,25 @@ fn toggle_main(app: &AppHandle) {
 fn register_hotkeys(app: &AppHandle, cfg: &Config) -> [HotkeyStatus; 3] {
     let gs = app.global_shortcut();
     let _ = gs.unregister_all();
-    let reg = |hotkey: &str| {
+    let mut singles = Vec::new();
+    let mut reg = |hotkey: &str, role: usize| {
         let hotkey = hotkey.trim();
         if hotkey.is_empty() {
             return HotkeyStatus::default();
+        }
+        // A single key ("L", "/") is read without taking it away from other apps.
+        if let Some(sc) = keys::single_key(hotkey) {
+            singles.push((sc, role));
+            return HotkeyStatus { hotkey: hotkey.into(), registered: true, error: None };
         }
         match gs.register(hotkey) {
             Ok(()) => HotkeyStatus { hotkey: hotkey.into(), registered: true, error: None },
             Err(e) => HotkeyStatus { hotkey: hotkey.into(), registered: false, error: Some(e.to_string()) },
         }
     };
-    [reg(&cfg.hotkey), reg(&cfg.capture.clip_hotkey), reg(&cfg.capture.record_hotkey)]
+    let out = [reg(&cfg.hotkey, 0), reg(&cfg.capture.clip_hotkey, 1), reg(&cfg.capture.record_hotkey, 2)];
+    keys::set_bindings(singles);
+    out
 }
 
 fn apply_hotkeys(app: &AppHandle, state: &AppState) {
@@ -499,7 +508,16 @@ fn hotkey_role(cfg: &Config, pressed: &tauri_plugin_global_shortcut::Shortcut) -
 fn on_hotkey(app: &AppHandle, pressed: &tauri_plugin_global_shortcut::Shortcut) {
     let Some(state) = app.try_state::<AppState>() else { return };
     let cfg = state.config.lock().unwrap().clone();
-    match hotkey_role(&cfg, pressed) {
+    if let Some(role) = hotkey_role(&cfg, pressed) {
+        on_role(app, role);
+    }
+}
+
+/// 0 = quick view, 1 = save clip, 2 = record.
+fn on_role(app: &AppHandle, role: usize) {
+    let Some(state) = app.try_state::<AppState>() else { return };
+    let cfg = state.config.lock().unwrap().clone();
+    match Some(role) {
         Some(0) => toggle_main(app),
         Some(1) => {
             if let Err(e) = state.engine.save_replay() {
@@ -899,6 +917,20 @@ async fn analyze_clip(state: State<'_, AppState>, path: String) -> Result<librar
     state.meta.set(&path, &info)
 }
 
+/// Reads when your kills happen in a clip, to mark them on the timeline.
+/// A known kill count (an auto clip's) is kept.
+#[tauri::command]
+async fn read_kill_times(state: State<'_, AppState>, path: String) -> Result<library::ClipInfo, String> {
+    let clip = ensure_clip(&state, &path)?;
+    let engine = state.engine.clone();
+    let times = tauri::async_runtime::spawn_blocking(move || engine.kill_times(&clip))
+        .await
+        .map_err(|e| e.to_string())??;
+    let known = library::ClipMeta::get_in(&state.meta.snapshot(), &path).kills;
+    let info = library::ClipInfo { kills: known.or(Some(times.len() as u32)), kill_times: Some(times), ..Default::default() };
+    state.meta.set(&path, &info)
+}
+
 /// Light or dark title bar for the app window, to match the chosen theme.
 #[tauri::command]
 fn set_window_theme(app: AppHandle, dark: bool) {
@@ -1114,6 +1146,7 @@ fn ui_ready(app: AppHandle) {
 /// While the user records a new hotkey, ours must not fire.
 #[tauri::command]
 fn set_hotkeys_paused(app: AppHandle, state: State<AppState>, paused: bool) {
+    keys::set_paused(paused);
     if paused {
         let _ = app.global_shortcut().unregister_all();
     } else {
@@ -1313,6 +1346,12 @@ fn main() {
                 meta: Arc::new(library::ClipMeta::load(meta_path)),
             });
 
+            let keys_app = handle.clone();
+            keys::init(move |role| {
+                // Back on the main thread, like the normal hotkeys.
+                let app = keys_app.clone();
+                let _ = keys_app.run_on_main_thread(move || on_role(&app, role));
+            });
             apply_hotkeys(&handle, &handle.state::<AppState>());
 
             // Launched by Windows at sign-in: stay in the tray. Otherwise show the window.
@@ -1403,6 +1442,7 @@ fn main() {
             set_reviewed,
             restore_clip,
             analyze_clip,
+            read_kill_times,
             open_app_window,
             set_window_theme,
             app_version,

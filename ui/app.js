@@ -854,6 +854,8 @@ function showCurrentClip(opts = {}) {
   updateReviewBar();
   loadClipVideo(c, opts.time || 0, opts.play !== false);
   loadWave(c);
+  renderKillMarks();
+  ensureKillTimes();
 }
 
 // Loads a clip into the player, starting at `time`. Never plays while the overlay is hidden.
@@ -886,11 +888,74 @@ function setInfo(path, info) {
     if (info.map) c.map = info.map;
     if (info.agent) c.agent = info.agent;
     if (info.auto) c.auto = true;
+    if (info.kill_times) c.kill_times = info.kill_times;
     c.counting = false;
   });
-  if (state.player) renderPlayerHeader();
+  if (state.player) { renderPlayerHeader(); renderKillMarks(); }
   if (state.view.name !== "settings") rerenderKeepScroll();
 }
+
+// ---------- kills on the timeline ----------
+
+const KILL_LEAD = 2; // jump to a little before the kill
+const curClip = () => state.player && state.player.list[state.player.index];
+const killTimes = () => {
+  const c = curClip();
+  return (c && c.kill_times) || [];
+};
+
+function renderKillMarks() {
+  const d = video.duration;
+  const times = d > 0 ? killTimes().filter((t) => t <= d) : [];
+  const total = times.length;
+  $("#vc-kills").innerHTML = times.map((t, i) =>
+    `<div class="kill-mark" data-t="${t}" style="left:${(t / d * 100).toFixed(3)}%" title="Kill ${i + 1}${total > 1 ? " of " + total : ""} · ${fmtClock(t)}"></div>`).join("");
+  updateHint();
+  $("#trim-kills").innerHTML = times.map((t) => `<div class="kill-mark" style="left:${(t / d * 100).toFixed(3)}%"></div>`).join("");
+}
+
+$("#vc-kills").addEventListener("pointerdown", (e) => {
+  const m = e.target.closest(".kill-mark");
+  if (!m) return;
+  e.preventDefault();
+  e.stopPropagation(); // not a scrub
+  video.currentTime = Math.max(0, parseFloat(m.dataset.t) - KILL_LEAD);
+  updateProgress();
+  if (video.paused) video.play().catch(() => {});
+});
+
+// N / P: next or previous kill.
+function jumpKill(dir) {
+  const times = killTimes();
+  if (!times.length) return;
+  const now = video.currentTime;
+  const targets = times.map((t) => Math.max(0, t - KILL_LEAD));
+  const t = dir > 0 ? targets.find((x) => x > now + 0.3) : [...targets].reverse().find((x) => x < now - 0.6);
+  if (t == null) return;
+  video.currentTime = t;
+  updateProgress();
+}
+
+// Clips counted before kill times existed (or saved with counting off) get them
+// read when you open them — only the killfeed corner, at low priority.
+const readingTimes = new Set();
+let killTimesTimer = 0;
+function ensureKillTimes() {
+  clearTimeout(killTimesTimer);
+  const c = curClip();
+  if (!c || c.kill_times || !isValorant(c.game) || readingTimes.has(c.path)) return;
+  const cap = (state.config && state.config.capture) || {};
+  if (c.kills == null && !cap.count_kills) return; // never counted and counting is off
+  killTimesTimer = setTimeout(() => {
+    if (curClip() !== c) return;
+    readingTimes.add(c.path);
+    invoke("read_kill_times", { path: c.path })
+      .then((info) => setInfo(c.path, info))
+      .catch(() => {})
+      .finally(() => readingTimes.delete(c.path));
+  }, 900);
+}
+["loadedmetadata", "durationchange"].forEach((ev) => video.addEventListener(ev, renderKillMarks));
 
 $("#p-kills").onclick = async () => {
   const c = state.player && state.player.list[state.player.index];
@@ -1285,9 +1350,16 @@ window.addEventListener("keydown", (e) => {
       return;
     }
   }
-  if (!state.player) return;
   const tag = e.target && e.target.tagName;
   const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+  // A single-key quick-view hotkey: Clipit has the keyboard now, so close it here.
+  const qk = state.config && state.config.hotkey;
+  if (!typing && !e.ctrlKey && !e.altKey && !e.metaKey && isSingleKey(qk) && keyCodeName(e.code).toLowerCase() === qk.toLowerCase() && !isAppMode()) {
+    e.preventDefault();
+    requestClose();
+    return;
+  }
+  if (!state.player) return;
   // The rename box handles its own Enter/Escape.
   if (typing && (e.key !== "Escape" || e.target.id === "p-rename-input")) return;
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -1310,6 +1382,8 @@ window.addEventListener("keydown", (e) => {
     i: () => { if (ed.open) setTrimPoint("start", video.currentTime); },
     o: () => { if (ed.open) setTrimPoint("end", video.currentTime); },
     f: () => toggleFavorite(state.player.list[state.player.index]),
+    n: () => jumpKill(1),
+    p: () => jumpKill(-1),
     F2: () => startRename(),
   }[key];
   if (handled && (e.ctrlKey || e.altKey || e.metaKey)) return;
@@ -1352,7 +1426,7 @@ function updateHint() {
     ? `<kbd>I</kbd> / <kbd>O</kbd> set start / end · drag the handles to trim · <kbd>Space</kbd> play/pause · <kbd>Esc</kbd> close editor`
     : inReview()
       ? `<kbd>K</kbd> keep · <kbd>D</kbd> delete · <kbd>S</kbd> skip · <kbd>Z</kbd> undo · <kbd>F</kbd> favorite · <kbd>E</kbd> edit · <kbd>Space</kbd> play/pause · <kbd>Esc</kbd> stop reviewing`
-      : `<kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> seek 5s · <kbd>,</kbd><kbd>.</kbd> frame · <kbd>↑</kbd><kbd>↓</kbd> previous/next · <kbd>M</kbd> mute · <kbd>F</kbd> favorite · <kbd>F2</kbd> rename · <kbd>E</kbd> edit · <kbd>Del</kbd> delete · <kbd>Esc</kbd> close`;
+      : `<kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> seek 5s · <kbd>,</kbd><kbd>.</kbd> frame · <kbd>↑</kbd><kbd>↓</kbd> previous/next · ${killTimes().length ? "<kbd>N</kbd><kbd>P</kbd> next/previous kill · " : ""}<kbd>M</kbd> mute · <kbd>F</kbd> favorite · <kbd>F2</kbd> rename · <kbd>E</kbd> edit · <kbd>Del</kbd> delete · <kbd>Esc</kbd> close`;
 }
 updateHint();
 
@@ -1850,26 +1924,35 @@ function fmtKey(k) {
   if (!k) return "";
   return k.split("+").map((p) => p
     .replace(/^Digit(\d)$/, "$1").replace(/^Key([A-Z])$/, "$1").replace(/^Numpad(\w+)$/, "Num $1")
-    .replace(/^Backquote$/, "`").replace(/^Control$/, "Ctrl").replace(/^Super$/, "Win")).join(" + ");
+    .replace(/^Backquote$/, "`").replace(/^Control$/, "Ctrl").replace(/^Super$/, "Win")
+    .replace(/^(Slash|BracketLeft|BracketRight|Backslash|IntlBackslash|Semicolon|Quote|Comma|Period|Minus|Equal)$/, (m) => KEY_SYMBOLS[m])).join(" + ");
 }
+const KEY_SYMBOLS = { Slash: "/", BracketLeft: "[", BracketRight: "]", Backslash: "\\", IntlBackslash: "\\", Semicolon: ";", Quote: "'", Comma: ",", Period: ".", Minus: "-", Equal: "=" };
+
+// The name a key is saved under: "L", "5", "Slash".
+const keyCodeName = (code) => (/^Digit\d$/.test(code) ? code.slice(5) : /^Key[A-Z]$/.test(code) ? code.slice(3) : code);
+// Keys that work alone without blocking typing elsewhere (see keys.rs).
+const SINGLE_KEY = /^(Key[A-Z]|Digit\d|Backquote|Minus|Equal|BracketLeft|BracketRight|Backslash|IntlBackslash|Semicolon|Quote|Comma|Period|Slash)$/;
+const isSingleKey = (k) => !!k && !k.includes("+") && SINGLE_KEY.test(/^\d$/.test(k) ? "Digit" + k : /^[A-Z]$/.test(k) ? "Key" + k : k === "`" ? "Backquote" : k);
 
 // Turns a keydown into an accelerator the hotkey library understands ("Alt+0", "F9").
 function acceleratorFor(e) {
   const code = e.code;
   if (/^(Control|Alt|Shift|Meta|OS)(Left|Right)?$/.test(code)) return null;
-  let key = code;
-  if (/^Digit\d$/.test(code)) key = code.slice(5);
-  else if (/^Key[A-Z]$/.test(code)) key = code.slice(3);
+  const key = keyCodeName(code);
   const mods = [];
   if (e.ctrlKey) mods.push("Ctrl");
   if (e.altKey) mods.push("Alt");
   if (e.shiftKey) mods.push("Shift");
   if (e.metaKey) mods.push("Super");
-  // Plain letters/digits alone would fire while you type in chat — need a modifier.
-  const standalone = /^F\d{1,2}$/.test(code) || /^(Pause|ScrollLock|PrintScreen|Insert|Home|End|PageUp|PageDown|Numpad\w+)$/.test(code);
-  if (!mods.length && !standalone) return { error: "Add Ctrl, Alt or Shift — a single key would trigger while typing." };
+  // Single letters, digits and punctuation work too: they only fire while a game
+  // is in front and still reach the game (see keys.rs).
+  const standalone = SINGLE_KEY.test(code) || /^F\d{1,2}$/.test(code) || /^(Pause|ScrollLock|PrintScreen|Insert|Home|End|PageUp|PageDown|Numpad\w+)$/.test(code);
+  if (!mods.length && !standalone) return { error: "This key needs Ctrl, Alt or Shift with it." };
   return { key: [...mods, key].join("+") };
 }
+
+const SINGLE_NOTE = "A single key (like L, / or ]) works only while a game is in front, and the game still gets the key too, so pick one your game doesn't use. Typing in other apps never triggers it.";
 
 function keyButton(name, value) {
   return `<button type="button" class="keycap${value ? "" : " unset"}" data-key="${name}" data-value="${esc(value || "")}">${value ? esc(fmtKey(value)) : "Not set"}</button>`;
@@ -2202,7 +2285,8 @@ function settingsPane(tab) {
         row("Save clip", `Saves the last ${esc(LENGTHS.find((l) => l[0] === c.replay_secs)?.[1] || c.replay_secs + " s")}`, keyButton("capture.clip_hotkey", c.clip_hotkey) + keyErr(st.clip_hotkey, saved.capture && saved.capture.clip_hotkey)),
         row("Start or stop recording", "Records until you press it again.", keyButton("capture.record_hotkey", c.record_hotkey) + keyErr(st.record_hotkey, saved.capture && saved.capture.record_hotkey)),
         row("Open quick view", "Pops Clipit over whatever you're doing.", keyButton("hotkey", d.hotkey) + keyErr(st.hotkey, saved.hotkey)),
-      ], "Click a key, then press the combination. Backspace clears it, Esc cancels.")}`;
+      ], "Click a key, then press a key or a combination. Backspace clears it, Esc cancels.")}
+      <div class="group-foot">${SINGLE_NOTE}</div>`;
   }
   if (tab === "appearance") {
     return `<h2>Appearance</h2><p class="lede">Changes show right away. Save to keep them.</p>
@@ -2588,12 +2672,13 @@ function renderWizard() {
   } else if (step === "keys") {
     body.innerHTML = `
       <h2 id="wiz-title">Pick your hotkeys</h2>
-      <p>Click a key, then press the combination. They work everywhere, even in-game.</p>
+      <p>Click a key, then press a key (like L or /) or a combination. They work everywhere, even in-game.</p>
       ${d.record ? `
         <div class="key-row"><div class="what"><b>Save clip</b><span>Keeps the last moments</span></div>${keyButton("clip_hotkey", d.clip_hotkey)}</div>
         <div class="key-row"><div class="what"><b>Start or stop recording</b><span>Optional</span></div>${keyButton("record_hotkey", d.record_hotkey)}</div>` : ""}
       <div class="key-row"><div class="what"><b>Open quick view</b><span>Clipit over whatever you're doing</span></div>${keyButton("hotkey", d.hotkey)}</div>
-      ${d.record ? `<p class="hint">If another app already uses a key you pick, turn it off there first so the key is free.</p>` : ""}`;
+      ${d.record ? `<p class="hint">If another app already uses a combination you pick, turn it off there first so it's free.</p>` : ""}
+      <p class="hint">${SINGLE_NOTE}</p>`;
     wireKeyButtons(body, (name, value) => { d[name] = value; renderWizardNav(); });
   } else if (step === "audio") {
     body.innerHTML = `

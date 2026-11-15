@@ -19,6 +19,8 @@
 
 **Clip**
 - **Instant replay**: the last 15 s to 10 min of your game, always ready. Press your hotkey to save it.
+- **Hotkeys** can be combinations (Alt+F9) or a single key (L, /, ]). Single keys only fire while a game is in front
+  and still reach the game; they're read with Raw Input, so nothing is hooked and the key isn't taken from other apps.
 - **Recording**: start and stop with another hotkey. Crash-safe: an interrupted recording is recovered on the next start.
 - **Game window only** (nothing runs until a game is in focus, and pop-ups never end up in your clips) or **whole monitor**.
 - Desktop audio and microphone, each on any device, with volume, mic noise suppression and optional separate tracks.
@@ -39,7 +41,8 @@
 **Watch, edit, share**
 - **Home** shows your newest clip in a big theatre-style player, your games above it and earlier clips below.
 - **Quick view** (`Alt+Z` by default) pops Clipit over your game with a soft blur; click away and it gives focus back.
-- Player with an audio waveform you can scrub, speed control, frame stepping and fullscreen.
+- Player with an audio waveform you can scrub, speed control, frame stepping and fullscreen. On VALORANT clips
+  each of your kills is marked on the timeline: click a mark, or press N / P to jump between kills.
 - **Edit & Send**: trim, crop to 9:16 / 1:1 / 4:5 / 4:3, compress under a size limit (10 / 50 / 500 MB or custom),
   then **Compress & Copy** to paste the file straight into Discord.
 - **Review**: go through new clips one by one: keep, delete to the Recycle Bin, skip, undo.
@@ -138,6 +141,7 @@ src-tauri/src/
   scanner.rs         finds clips, reads the date from "Game YYYY.MM.DD - HH.MM.SS" names
   media.rs           ffmpeg discovery, thumbnails, audio waveforms
   export.rs          trim / crop / compress
+  keys.rs            single-key hotkeys (Raw Input, only while a game is in front)
   library.rs         favorites, reviewed, clip info (kills, map, agent), rename, start with Windows
   stream.rs          local HTTP server (127.0.0.1 + random token) for clips and images
   overlay.rs         quick-view backdrop and focus checks
@@ -148,7 +152,7 @@ src-tauri/src/
     ts.rs            RAM replay buffer (MPEG-TS split at keyframes)
     audio.rs         WASAPI desktop + mic capture
     mux.rs           saving clips, live recording, named pipes
-    killfeed.rs      your kills in the killfeed, round tracking
+    killfeed.rs      your kills in the killfeed (and when), round tracking
     valorant.rs      map + agent recognition, reference images
     game.rs, sound.rs
 scripts/release.mjs  signed release → GitHub

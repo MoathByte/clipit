@@ -35,6 +35,10 @@ pub struct ClipInfo {
     pub auto: bool,
     pub map: Option<String>,
     pub agent: Option<String>,
+    /// When each of your kills happens, in seconds from the start of the clip
+    /// (shown on the timeline). None = not read yet (clips from before 0.11).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kill_times: Option<Vec<f32>>,
 }
 
 // ---------- reference images ----------
@@ -561,8 +565,11 @@ fn maps_in(f: &Frame, refs: &Refs, planner: &mut FftPlanner<f32>) -> Option<Vec<
 /// Kills (unless already known), map and agent for a saved clip. Never fails:
 /// what can't be told is left empty.
 pub fn analyze_clip(ffmpeg: &Path, clip: &Path, refs_dir: &Path, kills: Option<u32>, on_spawn: &dyn Fn(&std::process::Child)) -> ClipInfo {
-    let kills = kills.or_else(|| super::killfeed::count_in_clip(ffmpeg, clip, on_spawn).ok());
-    let mut info = ClipInfo { kills, ..Default::default() };
+    // Kill times are always read from the clip itself so the timeline marks match
+    // the video; an auto clip keeps the count its round was saved for.
+    let times = super::killfeed::kill_times_in_clip(ffmpeg, clip, on_spawn).ok();
+    let kills = kills.or_else(|| times.as_ref().map(|t| t.len() as u32));
+    let mut info = ClipInfo { kills, kill_times: times, ..Default::default() };
     let Some(refs) = refs(refs_dir) else { return info };
     let frames = frames(ffmpeg, clip, 8, on_spawn);
     // Agent: confident frames vote, weighted by how clearly they win. After you die

@@ -404,7 +404,13 @@ fn crop_filter() -> String {
 
 /// Counts your kills in a saved clip. Runs ffmpeg at low priority on the
 /// video's killfeed corner only (a 1-minute 1080p clip takes a few seconds).
+#[cfg(test)]
 pub fn count_in_clip(ffmpeg: &Path, clip: &Path, on_spawn: &dyn Fn(&std::process::Child)) -> Result<u32, String> {
+    kill_times_in_clip(ffmpeg, clip, on_spawn).map(|t| t.len() as u32)
+}
+
+/// When each of your kills shows up in a saved clip, in seconds from its start.
+pub fn kill_times_in_clip(ffmpeg: &Path, clip: &Path, on_spawn: &dyn Fn(&std::process::Child)) -> Result<Vec<f32>, String> {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-i"])
         .arg(clip)
@@ -429,11 +435,15 @@ pub fn count_in_clip(ffmpeg: &Path, clip: &Path, on_spawn: &dyn Fn(&std::process
     // The first steady frame is the starting point: entries already showing
     // when the clip starts are kills from before it.
     let mut tracker = Tracker::new();
-    let (mut n, mut kills) = (0u64, 0u32);
+    let (mut n, mut times) = (0u64, Vec::new());
     while out.read_exact(&mut frame).is_ok() {
         n += 1;
         let rows = own_kills(&Image { w: CROP_W, h: CROP_H, stride, bgr: &frame }, 1.0);
-        kills += tracker.feed(&rows, 32, t0 + Duration::from_millis(n * 250)) as u32;
+        let new = tracker.feed(&rows, 32, t0 + Duration::from_millis(n * 250));
+        // Frame n is shown at (n-1)/4 s. An entry fades in for about half a second
+        // before its border is clear enough to count; measured ~0.8 s late.
+        let at = ((n - 1) as f32 * 0.25 - 0.8).max(0.0);
+        times.extend(std::iter::repeat(at).take(new));
     }
     let status = child.wait().map_err(|e| e.to_string())?;
     let errs = errs.join().unwrap_or_default();
@@ -441,7 +451,7 @@ pub fn count_in_clip(ffmpeg: &Path, clip: &Path, on_spawn: &dyn Fn(&std::process
         let msg = errs.lines().last().unwrap_or("ffmpeg couldn't read the clip").to_string();
         return Err(msg);
     }
-    Ok(kills)
+    Ok(times)
 }
 
 #[cfg(test)]
@@ -648,8 +658,8 @@ mod tests {
     fn count_real_clip() {
         let clip = std::env::var("CLIPIT_KILLS_CLIP").expect("CLIPIT_KILLS_CLIP");
         let t = Instant::now();
-        let kills = count_in_clip(Path::new("ffmpeg"), Path::new(&clip), &|_| {}).unwrap();
-        println!("{kills} kill(s) in {:?}", t.elapsed());
+        let times = kill_times_in_clip(Path::new("ffmpeg"), Path::new(&clip), &|_| {}).unwrap();
+        println!("{} kill(s) at {times:?} s in {:?}", times.len(), t.elapsed());
     }
 
     /// Runs the detector over killfeed frames cut from real clips:

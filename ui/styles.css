@@ -462,6 +462,13 @@ body.mode-app .shell { inset: 0; margin: 0; width: 100%; height: 100%; border-ra
 .vc-scrub { position: relative; height: 48px; border-radius: 10px; background: rgba(var(--ink), .04); cursor: pointer; touch-action: none; }
 .vc-wave { position: absolute; left: 0; top: 4px; width: 100%; height: 40px; pointer-events: none; }
 .vc-wave.played { clip-path: inset(0 100% 0 0); }
+.vc-kills, .trim-kills { position: absolute; inset: 0; pointer-events: none; }
+.kill-mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); opacity: .55; }
+.vc-kills .kill-mark { pointer-events: auto; cursor: pointer; width: 14px; margin-left: -7px; background: none; opacity: 1; }
+.vc-kills .kill-mark::before { content: ""; position: absolute; left: 6px; top: 6px; bottom: 0; width: 2px; background: var(--accent); opacity: .6; }
+.vc-kills .kill-mark::after { content: ""; position: absolute; left: 3px; top: -4px; width: 8px; height: 8px; border-radius: 2px; transform: rotate(45deg); background: var(--accent); box-shadow: 0 0 0 2px var(--panel); }
+.vc-kills .kill-mark:hover::before { opacity: 1; }
+.vc-kills .kill-mark:hover::after { transform: rotate(45deg) scale(1.25); }
 .vc-head { position: absolute; top: -3px; bottom: -3px; left: 0; width: 3px; margin-left: -1.5px; border-radius: 3px; background: var(--text); pointer-events: none; }
 .vc-tip { position: absolute; bottom: calc(100% + 8px); transform: translateX(-50%); padding: 3px 8px; border-radius: 6px; background: rgba(0,0,0,.88); font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; pointer-events: none; white-space: nowrap; }
 .vc-row { display: flex; align-items: center; gap: 4px; margin-top: 8px; }

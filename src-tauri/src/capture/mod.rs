@@ -656,8 +656,17 @@ impl Engine {
     /// Kills, map and agent in any VALORANT clip (reads the file, not the screen).
     pub fn analyze(&self, clip: &Path) -> Result<valorant::ClipInfo, String> {
         let ffmpeg = self.s.ffmpeg.clone().ok_or("ffmpeg isn't installed")?;
-        let kills = killfeed::count_in_clip(&ffmpeg, clip, &|c| self.s.job.add(c))?;
-        Ok(valorant::analyze_clip(&ffmpeg, clip, &self.s.data_dir.join("valorant"), Some(kills), &|c| self.s.job.add(c)))
+        let info = valorant::analyze_clip(&ffmpeg, clip, &self.s.data_dir.join("valorant"), None, &|c| self.s.job.add(c));
+        if info.kill_times.is_none() {
+            return Err("Couldn't read the clip".into());
+        }
+        Ok(info)
+    }
+
+    /// Only when your kills happen (for the timeline): faster than `analyze`.
+    pub fn kill_times(&self, clip: &Path) -> Result<Vec<f32>, String> {
+        let ffmpeg = self.s.ffmpeg.clone().ok_or("ffmpeg isn't installed")?;
+        killfeed::kill_times_in_clip(&ffmpeg, clip, &|c| self.s.job.add(c))
     }
 
     // ---------- recording ----------

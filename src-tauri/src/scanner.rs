@@ -30,6 +30,8 @@ pub struct Clip {
     pub agent: Option<String>,
     /// Saved automatically by Clipit (a 3K, 4K, ace…).
     pub auto: bool,
+    /// Seconds into the clip where your kills happen, once read.
+    pub kill_times: Option<Vec<f32>>,
 }
 
 /// Paths Clipit keeps per-clip flags for.
@@ -133,6 +135,7 @@ pub fn clip_from(path: &Path, game: &str, flags: &Flags) -> Option<Clip> {
         map: info.map,
         agent: info.agent,
         auto: info.auto,
+        kill_times: info.kill_times,
         favorite: Favorites::is_favorite_in(flags.favorites, &path_str),
         reviewed: Favorites::is_favorite_in(flags.reviewed, &path_str),
         edited: is_edited(&file_name),

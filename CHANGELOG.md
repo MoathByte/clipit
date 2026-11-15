@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0
+
+- **Kills on the timeline**: VALORANT clips show a marker for each of your kills on the player's timeline (and in the
+  trim editor). Click one to jump to just before the kill, or press **N** / **P** for the next or previous kill.
+  Older clips get their markers the first time you open them.
+- **Single-key hotkeys**: set Save clip, Record or Quick view to one key like **L**, **/** or **]**. Single keys only
+  work while a game is in front and the game still gets the key, so typing in Discord or a browser never triggers
+  them. Combinations (Alt+Z, Ctrl+F9…) work as before.
+
 ## 0.10.0
 
 - **Auto clips are now highlights**: 3Ks with kills close together, plus every 4K and ace from the whole round, instead
