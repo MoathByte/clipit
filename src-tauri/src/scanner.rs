@@ -28,6 +28,8 @@ pub struct Clip {
     /// Map and agent, once recognised (VALORANT clips).
     pub map: Option<String>,
     pub agent: Option<String>,
+    /// Saved automatically by Clipit (a 3K, 4K, ace…).
+    pub auto: bool,
 }
 
 /// Paths Clipit keeps per-clip flags for.
@@ -130,6 +132,7 @@ pub fn clip_from(path: &Path, game: &str, flags: &Flags) -> Option<Clip> {
         kills: info.kills,
         map: info.map,
         agent: info.agent,
+        auto: info.auto,
         favorite: Favorites::is_favorite_in(flags.favorites, &path_str),
         reviewed: Favorites::is_favorite_in(flags.reviewed, &path_str),
         edited: is_edited(&file_name),

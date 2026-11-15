@@ -145,6 +145,8 @@ function renderSidebar() {
   $("#all-count").textContent = state.lib ? state.lib.clips.length : "";
   const favs = state.lib ? state.lib.clips.filter((c) => c.favorite).length : 0;
   $("#fav-count").textContent = favs || "";
+  const autos = state.lib ? state.lib.clips.filter((c) => c.auto).length : 0;
+  $("#auto-count").textContent = autos || "";
   const toReview = state.lib ? reviewQueue(DAY_MS).length : 0;
   $("#review-count").textContent = toReview || "";
   highlightNav();
@@ -212,7 +214,7 @@ function render() {
   if (v.name === "review") return renderReview();
   if (!state.lib.root_exists || state.lib.clips.length === 0) return renderEmpty();
   if (v.name === "home") return renderHome();
-  if (v.name === "all" || v.name === "favorites") return renderClipsPage(null);
+  if (v.name === "all" || v.name === "favorites" || v.name === "auto") return renderClipsPage(null);
   if (v.name === "game") {
     if (!state.lib.games.some((g) => g.name === v.game)) { state.view = { name: "home" }; return render(); }
     return renderClipsPage(v.game);
@@ -287,7 +289,7 @@ function renderHome() {
           <div class="feature-text">
             <div class="feature-kicker">Latest clip · ${esc(whenText(top.t))}</div>
             <h1 class="feature-title" title="${esc(top.title || top.game)}">${esc(top.title || top.game)}</h1>
-            <div class="feature-meta">${top.title ? esc(top.game) + " · " : ""}${esc(shortFmt.format(new Date(top.t)))} · ${fmtSize(top.size)}${tagText(top) ? " · " + esc(tagText(top)) : ""}${top.kills ? " · " + killText(top.kills) : ""}${top.edited ? " · Edited" : ""}</div>
+            <div class="feature-meta">${top.title ? esc(top.game) + " · " : ""}${esc(shortFmt.format(new Date(top.t)))} · ${fmtSize(top.size)}${tagText(top) ? " · " + esc(tagText(top)) : ""}${top.kills ? " · " + multiText(top.kills) : ""}${top.auto ? " · Auto clipped" : ""}${top.edited ? " · Edited" : ""}</div>
           </div>
           <div class="feature-actions">
             <button class="btn ghost fav-toggle${top.favorite ? " on" : ""}" id="feature-fav" title="Favorite">
@@ -363,7 +365,7 @@ function renderHomeArt(name) {
 
 function renderClipsPage(game) {
   main.innerHTML = `
-    ${game ? `<header class="hero" id="hero"></header>` : `<div class="page" style="padding-bottom:0"><h1>${state.view.name === "favorites" ? "Favorites" : "All clips"}</h1></div>`}
+    ${game ? `<header class="hero" id="hero"></header>` : `<div class="page" style="padding-bottom:0"><h1>${{ favorites: "Favorites", auto: "Auto clipped" }[state.view.name] || "All clips"}</h1></div>`}
     <div class="toolbar">
       <label class="search">
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -394,6 +396,7 @@ function renderTagFilters() {
   let base = state.lib.clips;
   if (v.name === "game") base = base.filter((c) => c.game === v.game);
   if (v.name === "favorites") base = base.filter((c) => c.favorite);
+  if (v.name === "auto") base = base.filter((c) => c.auto);
   const maps = [...new Set(base.map((c) => c.map).filter(Boolean))].sort();
   const agents = [...new Set(base.map((c) => c.agent).filter(Boolean))].sort();
   const anyKills = base.some((c) => c.kills > 0);
@@ -403,7 +406,7 @@ function renderTagFilters() {
   box.innerHTML =
     (maps.length ? sel("f-map", "All maps", maps.map((m) => [m, m]), state.filterMap) : "") +
     (agents.length ? sel("f-agent", "All agents", agents.map((a) => [a, a]), state.filterAgent) : "") +
-    (anyKills ? sel("f-kills", "Any kills", [[1, "1+ kills"], [3, "3+ kills"], [5, "Aces (5)"]], state.filterKills) : "");
+    (anyKills ? sel("f-kills", "Any kills", [[1, "1+ kills"], [3, "3K or more"], [4, "4K or more"], [5, "Aces"]], state.filterKills) : "");
   const wire = (id, key, num) => { const el = $("#" + id); if (el) el.onchange = () => { state[key] = num ? Number(el.value) || 0 : el.value; renderClipArea(); }; };
   wire("f-map", "filterMap");
   wire("f-agent", "filterAgent");
@@ -431,6 +434,7 @@ function currentClips() {
   let list = state.lib.clips;
   if (v.name === "game") list = list.filter((c) => c.game === v.game);
   if (v.name === "favorites") list = list.filter((c) => c.favorite);
+  if (v.name === "auto") list = list.filter((c) => c.auto);
   if (state.filterMap) list = list.filter((c) => c.map === state.filterMap);
   if (state.filterAgent) list = list.filter((c) => c.agent === state.filterAgent);
   if (state.filterKills) list = list.filter((c) => (c.kills || 0) >= state.filterKills);
@@ -442,6 +446,7 @@ function currentClips() {
       c.game.toLowerCase().includes(q) ||
       (c.map || "").toLowerCase().includes(q) ||
       (c.agent || "").toLowerCase().includes(q) ||
+      (c.auto && "auto clipped".includes(q)) ||
       dayLabel(c.t).toLowerCase().includes(q) ||
       shortFmt.format(new Date(c.t)).toLowerCase().includes(q));
   }
@@ -458,16 +463,21 @@ function renderClipArea() {
   const list = currentClips();
   state.list = list;
   $("#result-count").textContent = `${list.length} clip${list.length === 1 ? "" : "s"}`;
-  const multiGame = state.view.name === "all" || state.view.name === "favorites";
+  const multiGame = ["all", "favorites", "auto"].includes(state.view.name);
   let empty = `<div class="empty"><p>No clips match “${esc(state.search)}”.</p></div>`;
   if (!state.search.trim() && state.view.name === "favorites") {
     empty = `<div class="empty"><h2>No favorites yet</h2><p>Hover a clip and click the star, or press <kbd>F</kbd> while watching one.</p></div>`;
+  }
+  if (!state.search.trim() && state.view.name === "auto") {
+    empty = `<div class="empty"><h2>No auto clips yet</h2><p>Play VALORANT with auto clips on (Settings, Auto clips) and your 3Ks, 4Ks and aces land here.</p></div>`;
   }
   area.innerHTML = list.length ? clipGrid(list, multiGame, state.sort !== "big") : empty;
   wireClips();
 }
 
 const killText = (k) => `${k} kill${k === 1 ? "" : "s"}`;
+// "3K", "4K", "Ace" (5 kills in a round) — or "1 kill", "7 kills".
+const multiText = (k) => (k === 5 ? "Ace" : k >= 2 && k <= 4 ? `${k}K` : killText(k));
 const isValorant = (game) => String(game || "").trim().toLowerCase() === "valorant";
 
 // opts: { date: show the date before the time, game: show the game name }
@@ -485,7 +495,7 @@ function clipCard(c, i, opts) {
         <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
         ${c.edited ? `<span class="edited-badge">Edited</span>` : ""}
         <span class="fav-btn" role="button" title="Favorite"><svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg></span>
-        ${c.kills ? `<span class="kills-badge">${killText(c.kills)}</span>` : ""}
+        ${c.kills || c.auto ? `<span class="kills-badge">${c.auto ? `<span class="auto-dot" title="Auto clipped"></span>` : ""}${c.kills ? multiText(c.kills) : "Auto"}</span>` : ""}
         <span class="badge">${fmtSize(c.size)}</span>
       </div>
       <div class="clip-meta">${meta}</div>
@@ -875,6 +885,7 @@ function setInfo(path, info) {
     if (info.kills != null) c.kills = info.kills;
     if (info.map) c.map = info.map;
     if (info.agent) c.agent = info.agent;
+    if (info.auto) c.auto = true;
     c.counting = false;
   });
   if (state.player) renderPlayerHeader();
@@ -903,7 +914,7 @@ function renderPlayerHeader() {
   const d = new Date(c.t);
   $("#p-game").textContent = c.title || c.game;
   $("#p-game").title = c.title || "";
-  const tags = tagText(c);
+  const tags = [c.auto ? "Auto clipped" : "", tagText(c)].filter(Boolean).join(" · ");
   $("#p-sub").textContent = `${c.title ? c.game + " · " : ""}${tags ? tags + " · " : ""}${dayLabel(c.t)} at ${timeFmt.format(d)} · ${fmtSize(c.size)} · ${c.file_name}`;
 }
 
@@ -1989,6 +2000,7 @@ const ICON = {
   general: `<svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>`,
   recording: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>`,
   audio: `<svg viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6"/></svg>`,
+  auto: `<svg viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></svg>`,
   hotkeys: `<svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>`,
   appearance: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>`,
   storage: `<svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></svg>`,
@@ -1997,6 +2009,7 @@ const ICON = {
 const SET_TABS = [
   ["general", "General", "var(--c4)"],
   ["recording", "Recording", "var(--accent)"],
+  ["auto", "Auto clips", "var(--c3)"],
   ["audio", "Audio", "var(--c2)"],
   ["hotkeys", "Hotkeys", "var(--c3)"],
   ["appearance", "Appearance", "var(--accent)"],
@@ -2063,20 +2076,43 @@ const rangeB = (path, min, max, step) =>
 const fieldB = (path, placeholder, browse, type = "text") =>
   `<div class="field"><input type="${type}" data-bind="${path}" value="${esc(dv(path) || "")}" placeholder="${esc(placeholder)}" spellcheck="false">${browse ? `<button type="button" class="btn" data-browse="${path}">Browse</button>` : ""}</div>`;
 
+function ffmpegFixRow() {
+  const s = state.status || {};
+  const old = s.ffmpeg && !s.ffmpeg_capture;
+  return row(old ? "Update ffmpeg" : "Install ffmpeg",
+    old ? `Clipit found ffmpeg ${esc(s.ffmpeg_version || "")}, which can't record games. Recording needs ffmpeg 8 or newer.` : "Clipit records with ffmpeg, which isn't installed yet.",
+    `<button type="button" class="btn primary" data-ffmpeg="update">${old ? "Update" : "Install"}</button><button type="button" class="btn" data-ffmpeg="restart">Restart Clipit</button>`);
+}
+
 function capStatusRow(st) {
   if (!st) return row("Recorder", "Checking…", "");
+  if (st.state === "no-ffmpeg") return `<div id="cap-status">${row(esc(st.message), "Install or update it with Windows' own package manager (winget), then restart Clipit.", `<span class="status-badge bad">Stopped</span>`)}${ffmpegFixRow()}</div>`;
   const badge = st.recording ? `<span class="status-badge bad">Recording</span>` : st.state === "buffering" ? `<span class="status-badge on">Ready</span>` : st.state === "error" || st.state === "no-ffmpeg" ? `<span class="status-badge bad">Stopped</span>` : `<span class="status-badge">${esc({ waiting: "Waiting", off: "Off", starting: "Starting" }[st.state] || st.state)}</span>`;
   const sub = st.state === "buffering" ? `${esc(st.encoder)} · ${esc(st.detail)} · ${fmtSize(st.ram_bytes)} in RAM` : "";
   return `<div class="row" id="cap-status"><div class="row-text"><div class="row-label">${esc(st.message)}</div>${sub ? `<div class="row-sub">${sub}</div>` : ""}</div><div class="row-control">${badge}</div></div>`;
 }
 
-// How kill clips work, and what they cost in RAM.
-function killFoot(c) {
-  const mb = Math.round(estimateKbps(c, 1080) * 1000 / 8 * 210 / 1e6);
-  const parts = [];
-  if (c.auto_clip_kills) parts.push(`A round's clip closes 35 seconds after your last kill. That's longer than the end of a round plus the buy phase, so an ace with pauses stays in one clip and two rounds never merge. While VALORANT is captured, the replay keeps up to 3½ minutes in RAM so a whole round fits (about ${mb} MB).`);
-  parts.push("Kills are read from Clipit's own recording, never from your screen or the game, so it stays out of Vanguard's way. Map and agent are read from the saved clip: the minimap (even zoomed in or rotating) and your ability icons.");
-  return parts.join(" ");
+// One sentence saying what the auto-clip settings will do.
+function autoSummary(c) {
+  if (!c.enabled) return "Turn on instant replay (Recording) to use auto clips.";
+  if (!c.auto_clip_kills) return "Auto clips are off. Clipit still counts kills and tags map and agent in clips you save.";
+  const min = c.auto_min_kills;
+  const what = min >= 5 ? "aces" : `${multiText(min)}s or better`;
+  const close = c.auto_max_gap_secs >= 999 ? "anywhere in a round" : `with at most ${c.auto_max_gap_secs} s between kills`;
+  const whole = c.auto_whole_round_from === 4 ? " Every 4K and ace is clipped from the whole round, however spread out." : c.auto_whole_round_from === 5 ? " Every ace is clipped from the whole round, however spread out." : "";
+  return `Clips ${what} ${close}.${whole} Each clip starts ${c.kill_before_secs} s before the first kill, ends ${c.kill_after_secs} s after the last and is at most ${c.auto_max_mb >= 1000 ? c.auto_max_mb / 1000 + " GB" : c.auto_max_mb + " MB"}.${c.auto_skip_deathmatch ? " Deathmatch and Team Deathmatch are skipped." : ""}`;
+}
+
+// Longest auto clip (seconds) for the size limit at the recording bitrate.
+function autoMaxSecs(c) {
+  const kbps = estimateKbps(c, (state.capInfo && state.capInfo.monitors[0] && state.capInfo.monitors[0].height) || 1080);
+  return Math.max(10, Math.floor(c.auto_max_mb * 8000 / kbps));
+}
+
+function autoRam(c) {
+  const kbps = estimateKbps(c, (state.capInfo && state.capInfo.monitors[0] && state.capInfo.monitors[0].height) || 1080);
+  const secs = Math.min(autoMaxSecs(c), c.kill_before_secs + 150 + c.kill_after_secs) + 45;
+  return Math.round(kbps * 1000 / 8 * secs / 1e6);
 }
 
 function settingsPane(tab) {
@@ -2122,13 +2158,27 @@ function settingsPane(tab) {
         row("Format", "", selectB("capture.codec", codecs)),
         row("Encoder", "", selectB("capture.encoder", [["auto", "Automatic (best on this PC)"], ...encoders.map((e) => [e, encoderLabel(info.encoders, e)])])),
       ], "H.264 plays in Discord and everywhere else. HEVC and AV1 make smaller files, but some apps can't play them.")}
-      ${group("VALORANT", [
-        row("Clip every round you get kills", "One clip per round, from a few seconds before your first kill to after your last, so an ace stays in one clip.", toggle("capture.auto_clip_kills")),
-        c.auto_clip_kills ? row("Keep before the first kill", "", segB("capture.kill_before_secs", [[4, "4 s"], [8, "8 s"], [12, "12 s"]], true)) : "",
-        c.auto_clip_kills ? row("Keep after the last kill", "", segB("capture.kill_after_secs", [[2, "2 s"], [4, "4 s"], [8, "8 s"]], true)) : "",
-        row("Count kills and tag map and agent", "For every VALORANT clip you save.", toggle("capture.count_kills")),
-      ], killFoot(c))}
       ${group("Sounds", [row("Chimes", "A short sound when a clip is saved or a recording starts or stops.", toggle("capture.sounds"))])}`;
+  }
+  if (tab === "auto") {
+    const on = c.auto_clip_kills;
+    const fmtSecs = (x) => (x >= 60 ? `${Math.floor(x / 60)} min${x % 60 ? " " + (x % 60) + " s" : ""}` : `${x} s`);
+    return `<h2>Auto clips</h2><p class="lede">VALORANT highlights, saved for you while you play.</p>
+      <div class="group"><div class="list"><div class="row"><div class="row-text"><div class="row-label">What happens</div><div class="row-sub" id="auto-summary">${esc(autoSummary(c))}</div></div></div></div></div>
+      ${group("", [row("Auto clip highlights", "3Ks, 4Ks and aces in VALORANT, each saved as its own clip and tagged Auto clipped.", toggle("capture.auto_clip_kills"))])}
+      ${on ? group("What counts", [
+        row("Fewest kills", "A streak needs at least this many of your kills.", segB("capture.auto_min_kills", [[2, "2K"], [3, "3K"], [4, "4K"], [5, "Ace"]], true)),
+        row("Kills close together", "Kills further apart than this start a new streak.", segB("capture.auto_max_gap_secs", [[10, "10 s"], [15, "15 s"], [20, "20 s"], [30, "30 s"], [999, "Any"]], true)),
+        row("Whole round for big rounds", "Clip these from the first kill to the last, however spread out.", segB("capture.auto_whole_round_from", [[4, "4K and aces"], [5, "Aces"], [0, "Off"]], true)),
+        row("Skip Deathmatch", "No auto clips in Deathmatch, Team Deathmatch and other modes without rounds.", toggle("capture.auto_skip_deathmatch")),
+      ]) : ""}
+      ${on ? group("Clip length and size", [
+        row("Before the first kill", "", segB("capture.kill_before_secs", [[3, "3 s"], [6, "6 s"], [10, "10 s"], [15, "15 s"]], true)),
+        row("After the last kill", "", segB("capture.kill_after_secs", [[1, "1 s"], [3, "3 s"], [5, "5 s"], [8, "8 s"]], true)),
+        row("Largest clip", `At your quality that's about ${fmtSecs(autoMaxSecs(c))}. Longer highlights keep their end.`, segB("capture.auto_max_mb", [[100, "100 MB"], [200, "200 MB"], [300, "300 MB"], [500, "500 MB"], [1000, "1 GB"]], true)),
+      ], `While VALORANT is being recorded, the replay keeps enough to finish a highlight: up to about ${autoRam(c)} MB of RAM. A highlight is saved once you've gone 40 seconds without a kill, so the clip arrives a little after the round.`) : ""}
+      ${group("Tags", [row("Count kills and tag map and agent", "For every VALORANT clip, saved by you or automatically.", toggle("capture.count_kills"))],
+        "Kills are read from Clipit's own recording, never from your screen or the game, so it stays out of Vanguard's way. Map and agent are read from the saved clip: the minimap (even zoomed in or rotating) and your ability icons.")}`;
   }
   if (tab === "audio") {
     return `<h2>Audio</h2><p class="lede">Both follow your Windows default device unless you pick one.</p>
@@ -2164,7 +2214,10 @@ function settingsPane(tab) {
       ${group("Clips folder", [`<div class="row stack">${fieldB("clips_root", "Choose a folder", true)}<div class="row-sub">${st.root_exists ? "Folder found. Each game gets its own sub-folder." : "Folder not found yet. It's created when the first clip is saved."}</div></div>`])}
       ${group("Exports", [`<div class="row stack">${fieldB("export_dir", "Next to the original clip (recommended)", true)}</div>`], "Edited clips are saved next to the original so they show up in your library. Pick a folder only if you'd rather keep them somewhere else; they won't appear in the library then.")}
       ${group("Game artwork", [`<div class="row stack">${fieldB("steamgriddb_key", "SteamGridDB API key", false, "password")}</div>`, row("Download artwork again", st.has_art_key ? "Uses the saved key." : "Save a key first.", `<button type="button" class="btn" id="set-refresh-art">Refresh</button>`)], "Covers and logos come from SteamGridDB. Make a free account and copy your API key from steamgriddb.com/profile/preferences/api.")}
-      ${group("Tools", [row("ffmpeg", st.ffmpeg ? `<code>${esc(st.ffmpeg)}</code>` : "Not found. Install it with <code>winget install Gyan.FFmpeg</code>, then restart Clipit.", st.ffmpeg ? `<span class="status-badge on">Found</span>` : `<span class="status-badge bad">Missing</span>`)])}`;
+      ${group("Tools", [
+        row("ffmpeg", st.ffmpeg ? `${esc(st.ffmpeg_version || "")} · <code>${esc(st.ffmpeg)}</code>` : "Not found.", st.ffmpeg && st.ffmpeg_capture ? `<span class="status-badge on">Ready</span>` : st.ffmpeg ? `<span class="status-badge bad">Too old</span>` : `<span class="status-badge bad">Missing</span>`),
+        !(st.ffmpeg && st.ffmpeg_capture) ? ffmpegFixRow() : "",
+      ])}`;
   }
   const u = upd;
   const status = u.checking ? "Checking…" : u.installing ? (u.progress != null ? `Downloading ${Math.round(u.progress * 100)}%` : "Installing…") : u.available ? `Version ${esc(u.available.version)} is ready to install.` : u.error ? `Couldn't check: ${esc(u.error)}` : u.checked ? "You're on the latest version." : "";
@@ -2177,6 +2230,19 @@ function settingsPane(tab) {
       row("Check automatically", "Looks for a new version when Clipit starts. Installing always waits for you.", toggle("auto_update")),
     ], "Updates come from github.com/MoathByte/clipit and are signed; Clipit only installs files signed by the project. A recording in progress is finished and saved first.")}
     ${group("", [row("Replay buffer", "Kept in RAM; clips are written once, front to back.", ""), row("VALORANT", "Kills are read from Clipit's own recording and saved clips, never from your screen or the game.", "")])}`;
+}
+
+function wireFfmpegButtons(root) {
+  root.querySelectorAll("[data-ffmpeg]").forEach((b) => (b.onclick = async () => {
+    try {
+      if (b.dataset.ffmpeg === "update") {
+        await invoke("update_ffmpeg");
+        toast("A window is installing ffmpeg. When it says Done, click Restart Clipit.");
+      } else {
+        await invoke("restart_app");
+      }
+    } catch (e) { toast(String(e), true); }
+  }));
 }
 
 // ---------- updates ----------
@@ -2261,7 +2327,7 @@ function updateSaveBar() {
 }
 
 // Changes that add or remove rows rebuild the pane.
-const REBUILD = /^(window_mode|animation|theme_mode|capture\.(enabled|target|games_mode|codec|desktop_audio|mic|replay_secs|auto_clip_kills))$/;
+const REBUILD = /^(window_mode|animation|theme_mode|capture\.(enabled|target|games_mode|codec|desktop_audio|mic|replay_secs|auto_clip_kills|auto_max_mb|auto_min_kills|auto_max_gap_secs|auto_whole_round_from|kill_before_secs|kill_after_secs|auto_skip_deathmatch|quality|fps|resolution))$/;
 
 function onDraftChange(path, value) {
   setPath(setUI.draft, path, value);
@@ -2317,6 +2383,7 @@ function wireSettings() {
     renderSidebar();
     toast("Refreshing artwork");
   };
+  wireFfmpegButtons(main);
   if ($("#upd-check")) $("#upd-check").onclick = () => checkForUpdate(false);
   if ($("#upd-install")) $("#upd-install").onclick = installUpdate;
   $("#set-save").onclick = saveSettingsDraft;
@@ -2362,7 +2429,12 @@ async function saveSettingsDraft() {
 function refreshSettingsBits() {
   if (state.view.name !== "settings") return;
   const box = $("#cap-status");
-  if (box && state.capStatus) box.outerHTML = capStatusRow(state.capStatus);
+  if (box && state.capStatus) {
+    box.outerHTML = capStatusRow(state.capStatus);
+    wireFfmpegButtons(main);
+  }
+  const sum = $("#auto-summary");
+  if (sum && setUI.draft) sum.textContent = autoSummary(setUI.draft.capture);
 }
 
 async function openSettings() {
@@ -2388,7 +2460,7 @@ function updateRecWidget() {
   const error = !!st && (st.state === "error" || st.state === "no-ffmpeg");
   w.className = "recorder" + (rec ? " recording" : error ? " error" : ready ? "" : " idle");
   const label = rec ? `Recording ${fmtDur(rec.secs)}` : !st ? "Starting" : ({
-    buffering: "Replay ready", waiting: "Waiting for a game", off: "Replay off", starting: "Starting", error: "Capture stopped", "no-ffmpeg": "ffmpeg missing",
+    buffering: "Replay ready", waiting: "Waiting for a game", off: "Replay off", starting: "Starting", error: "Capture stopped", "no-ffmpeg": state.status && state.status.ffmpeg ? "Update ffmpeg" : "ffmpeg missing",
   }[st.state] || st.message);
   $("#rec-text").textContent = label;
   $("#rec-text").title = st ? st.message : "";
@@ -2435,7 +2507,7 @@ let lastSavedClip = null;
 listen("clip-saved", (e) => {
   lastSavedClip = e.payload.path;
   const k = e.payload.kills;
-  toast(k ? `Round clip saved · ${killText(k)} · ${fmtSize(e.payload.size || 0)}` : `Clip saved · ${fmtSize(e.payload.size || 0)}`);
+  toast(k ? `Auto clipped ${k === 5 ? "an ace" : "a " + multiText(k)} · ${fmtSize(e.payload.size || 0)}` : `Clip saved · ${fmtSize(e.payload.size || 0)}`);
 });
 // Read from the saved file a few seconds after a VALORANT clip is saved.
 listen("clip-info", (e) => {
@@ -2510,7 +2582,9 @@ function renderWizard() {
       <h2 id="wiz-title">Welcome to Clipit</h2>
       <p>Save the last minute of any game with one key, then trim and share it. First, pick how it looks.</p>
       <div class="row-between"><span>Mode</span>${seg("w_mode", [["dark", "Dark"], ["light", "Light"], ["system", "Match Windows"]], d.theme_mode)}</div>
-      <div style="margin-top:12px">${themeCards(d.theme, "data-wtheme")}</div>`;
+      <div style="margin-top:12px">${themeCards(d.theme, "data-wtheme")}</div>
+      ${state.status && !state.status.ffmpeg_capture ? `<div class="list" style="margin-top:16px">${ffmpegFixRow()}</div>` : ""}`;
+    wireFfmpegButtons(body);
   } else if (step === "keys") {
     body.innerHTML = `
       <h2 id="wiz-title">Pick your hotkeys</h2>
@@ -2632,7 +2706,7 @@ function rerenderKeepScroll() {
   if (state.view.name === "settings") return;
   const top = main.scrollTop;
   const searchFocused = document.activeElement && document.activeElement.id === "search";
-  if (["home", "all", "game", "favorites", "review"].includes(state.view.name)) {
+  if (["home", "all", "game", "favorites", "auto", "review"].includes(state.view.name)) {
     if ($("#clip-area") && state.view.name !== "home") {
       if (state.view.name === "game") renderHero();
       renderClipArea();

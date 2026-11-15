@@ -98,10 +98,21 @@ pub struct Capture {
     /// Save a clip of every round you get kills in (VALORANT). Reads the killfeed
     /// from Clipit's own capture, never the screen or the game.
     pub auto_clip_kills: bool,
-    /// Seconds kept before the first kill of a round.
+    /// Seconds kept before the first kill of a highlight.
     pub kill_before_secs: u32,
-    /// Seconds kept after the last kill of a round.
+    /// Seconds kept after the last kill of a highlight.
     pub kill_after_secs: u32,
+    /// Fewest kills in a streak to auto clip (2–5).
+    pub auto_min_kills: u32,
+    /// Kills further apart than this (seconds) start a new streak.
+    pub auto_max_gap_secs: u32,
+    /// Rounds with at least this many kills are clipped whole, however spread out
+    /// (4 = 4Ks and aces, 5 = aces only, 0 = never).
+    pub auto_whole_round_from: u32,
+    /// Don't auto clip Deathmatch, Team Deathmatch and other modes without rounds.
+    pub auto_skip_deathmatch: bool,
+    /// Largest auto clip (MB); longer highlights keep their end.
+    pub auto_max_mb: u32,
 }
 
 impl Default for Capture {
@@ -132,8 +143,13 @@ impl Default for Capture {
             record_hotkey: String::new(),
             count_kills: true,
             auto_clip_kills: true,
-            kill_before_secs: 8,
-            kill_after_secs: 4,
+            kill_before_secs: 6,
+            kill_after_secs: 3,
+            auto_min_kills: 3,
+            auto_max_gap_secs: 20,
+            auto_whole_round_from: 4,
+            auto_skip_deathmatch: true,
+            auto_max_mb: 300,
         }
     }
 }

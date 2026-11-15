@@ -1,6 +1,6 @@
 [package]
 name = "clipit"
-version = "0.9.0"
+version = "0.10.0"
 description = "A lightweight game clipper and clip library"
 authors = ["MoathByte"]
 license = "MIT"

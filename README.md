@@ -25,11 +25,12 @@
 - 720p to native, 30–144 fps, H.264 / HEVC / AV1 on your graphics card.
 
 **VALORANT**
-- **Round clips**: one clip for every round you get kills in, from a few seconds before your first kill to after
-  your last. A round only ends after 35 seconds without a kill (longer than a round's end plus the buy phase), so an
-  ace with long pauses stays in one clip and two rounds never merge.
+- **Auto clips for highlights**: 3Ks with kills close together, and every 4K and ace from the whole round, saved as
+  their own clips and tagged **Auto clipped** (with 3K / 4K / Ace badges). Everything is adjustable: fewest kills
+  (2K to ace), how close together kills must be, whole-round clips for 4Ks and aces, seconds before and after, and the
+  largest clip size. Deathmatch and Team Deathmatch are skipped.
 - **Kill counts, map and agent** on every VALORANT clip: the map is read from the minimap (zoomed in, rotating or
-  cut off by its circle), the agent from your ability icons. Filter your library by map, agent or kills (1+, 3+, aces).
+  cut off by its circle), the agent from your ability icons. Filter your library by map, agent or kills (3K, 4K, aces).
 - **Vanguard-friendly by design**: Clipit never reads game memory, never injects anything, never sends input and
   never takes screenshots for this. Kills are read from Clipit's own recording (the same Windows Graphics Capture
   that OBS and Discord use), as a tiny 4-frames-a-second copy of the killfeed corner; map and agent are read from
@@ -63,12 +64,14 @@ Clipit keeps the replay in RAM and writes each clip exactly once.
 | Sync | Audio and video share the system clock; measured offset 1–2 ms |
 | Idle | In game-window mode nothing runs without a game; ffmpeg can't outlive Clipit; after 2 minutes hidden the UI is unloaded (~30 MB total) |
 
-While VALORANT is captured with round clips on, the replay buffer keeps up to 3½ minutes so a whole round fits.
+While VALORANT is recorded with auto clips on, the replay buffer keeps enough to finish a highlight (the largest clip
+plus 45 seconds; about 400 MB of RAM at the defaults).
 
 ## Install
 
 1. Download `Clipit_x.y.z_x64-setup.exe` from the [latest release](https://github.com/MoathByte/clipit/releases/latest) and run it.
-2. Install ffmpeg if you don't have it: `winget install Gyan.FFmpeg`.
+2. Clipit needs ffmpeg 8 or newer (for Windows Graphics Capture). If it's missing or too old, Clipit offers a
+   one-click install through winget; or run `winget install Gyan.FFmpeg` yourself.
 3. Open Clipit and follow the short setup: look, hotkeys, audio, what to capture and where clips go
    (default `Videos\Clipit`).
 
@@ -76,6 +79,10 @@ Windows 10/11, 64-bit. A graphics card with a hardware video encoder is recommen
 
 ## How the VALORANT detection works
 
+- **Highlights**: a round ends 40 seconds after your last kill (longer than a round's end plus the buy phase).
+  Then its kills are checked against your rules: streaks of kills close together, or the whole round for 4Ks and aces.
+  More than six kills without a round break, or a "round" over 150 seconds, means Deathmatch-style play, and auto
+  clips pause until three minutes pass without a kill.
 - **Kills**: your own kills appear in the killfeed with a thin yellow border. Clipit finds yellow top and bottom edges
   on a teal/red bar that reaches the screen's right edge. Each entry stays up about five seconds and new ones are added
   at the bottom, so a kill is "more of your entries than are alive" or "one of yours below your lowest live one".

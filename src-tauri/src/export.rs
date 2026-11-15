@@ -428,7 +428,7 @@ mod tests {
     #[ignore]
     fn real_export_trim_crop_10mb() {
         let clip = std::env::var("CLIPIT_TEST_CLIP").expect("set CLIPIT_TEST_CLIP");
-        let ffmpeg = crate::media::find_ffmpeg().expect("ffmpeg");
+        let ffmpeg = crate::media::find_ffmpeg().expect("ffmpeg").path;
         let out_dir = std::env::temp_dir().join("clipit-test");
         std::fs::create_dir_all(&out_dir).unwrap();
         let jobs = Jobs::default();

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0
+
+- **Auto clips are now highlights**: 3Ks with kills close together, plus every 4K and ace from the whole round, instead
+  of every round with a kill. All of it is adjustable in the new **Settings → Auto clips** tab: fewest kills (2K to ace),
+  how close kills must be, whole-round clips for 4Ks and aces, time before and after, and the largest clip size.
+- **Deathmatch is skipped**: Deathmatch, Team Deathmatch and other modes without rounds no longer produce huge clips.
+- **Auto clipped** section in the sidebar, an "Auto clipped" tag and 3K / 4K / Ace badges on clips.
+- **Older ffmpeg versions are detected**: Clipit picks an ffmpeg that can record games (8 or newer) and, if there isn't
+  one, explains it and offers a one-click update through winget. Fixes "Capture stopped: Filter not found".
+- A clear summary of what auto clips will do, and estimates of clip length and RAM for your quality.
+
 ## 0.9.0
 
 - **Round clips for VALORANT**: Clipit saves one clip for every round you get kills in, from a few seconds before

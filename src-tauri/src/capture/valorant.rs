@@ -30,6 +30,9 @@ use std::os::windows::process::CommandExt;
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct ClipInfo {
     pub kills: Option<u32>,
+    /// Saved automatically (a 3K, 4K, ace…), shown as "Auto clipped".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto: bool,
     pub map: Option<String>,
     pub agent: Option<String>,
 }
@@ -559,7 +562,7 @@ fn maps_in(f: &Frame, refs: &Refs, planner: &mut FftPlanner<f32>) -> Option<Vec<
 /// what can't be told is left empty.
 pub fn analyze_clip(ffmpeg: &Path, clip: &Path, refs_dir: &Path, kills: Option<u32>, on_spawn: &dyn Fn(&std::process::Child)) -> ClipInfo {
     let kills = kills.or_else(|| super::killfeed::count_in_clip(ffmpeg, clip, on_spawn).ok());
-    let mut info = ClipInfo { kills, map: None, agent: None };
+    let mut info = ClipInfo { kills, ..Default::default() };
     let Some(refs) = refs(refs_dir) else { return info };
     let frames = frames(ffmpeg, clip, 8, on_spawn);
     // Agent: confident frames vote, weighted by how clearly they win. After you die

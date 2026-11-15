@@ -23,43 +23,132 @@ use std::os::windows::process::CommandExt;
 /// VALORANT's game exe (lower case).
 pub const VALORANT_EXE: &str = "valorant-win64-shipping.exe";
 
-/// No kill for this long and the round is over. A round's end screen plus the buy
-/// phase take longer than this, so two rounds never share a clip, while an ace with
-/// long pauses between kills still does.
-pub const ROUND_GAP_SECS: u64 = 35;
-/// A kill clip never covers more than this from the first kill (a full round with
-/// spike plant fits).
-pub const MAX_ROUND_SECS: u64 = 150;
+/// No kill of yours for this long and the round is over. A round's end screen, the
+/// buy phase and walking to the enemy take longer than this, so two rounds never
+/// share a clip, while kills with long pauses inside one round still do.
+pub const ROUND_GAP_SECS: f64 = 40.0;
+/// A real round never runs longer than this from your first kill (100 s round +
+/// 45 s spike). Kills going on longer mean Deathmatch-style modes.
+pub const MAX_ROUND_SECS: f64 = 150.0;
+/// After Deathmatch-style play is noticed, no auto clips until you've had no kills
+/// for this long (the match is over).
+pub const DEATHMATCH_QUIET_SECS: f64 = 180.0;
+/// More of your kills than this without a round break: Deathmatch-style play.
+pub const DEATHMATCH_KILLS: usize = 6;
 
-/// Kills in the round being played: (first kill, last kill) on the capture clock.
+/// What counts as a highlight.
+#[derive(Clone, Copy, Debug)]
+pub struct Rules {
+    /// Fewest kills in a streak to clip it (2–5).
+    pub min_kills: u32,
+    /// Kills further apart than this start a new streak.
+    pub max_gap_secs: f64,
+    /// A round with at least this many kills is clipped whole, however spread out
+    /// (4 = 4Ks and aces; 0 = never).
+    pub whole_round_from: u32,
+    /// Skip Deathmatch, Team Deathmatch and other modes without 5v5 rounds.
+    pub skip_deathmatch: bool,
+}
+
+/// Which kills of a finished round to clip: (first index, last index) pairs.
+/// `times` are seconds, oldest first.
+pub fn highlights(times: &[f64], r: &Rules) -> Vec<(usize, usize)> {
+    let n = times.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if r.whole_round_from > 0 && n as u32 >= r.whole_round_from && n as u32 >= r.min_kills.min(r.whole_round_from) {
+        return vec![(0, n - 1)];
+    }
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 1..=n {
+        if i == n || times[i] - times[i - 1] > r.max_gap_secs {
+            if (i - start) as u32 >= r.min_kills.max(1) {
+                out.push((start, i - 1));
+            }
+            start = i;
+        }
+    }
+    out
+}
+
+/// The kills of the round being played, and Deathmatch detection.
 #[derive(Default)]
 pub struct Round {
-    first: Option<(Instant, i64)>,
-    last: Option<(Instant, i64)>,
-    kills: u32,
+    /// (when, capture clock in 100 ns)
+    kills: Vec<(Instant, i64)>,
+    /// Deathmatch-style play seen: no auto clips until this quiet moment passes.
+    deathmatch_until: Option<Instant>,
+}
+
+/// A finished round: the kills to clip, as (first, last, count) on the capture clock.
+#[derive(Debug, PartialEq)]
+pub enum RoundEnd {
+    Clips(Vec<(i64, i64, u32)>),
+    /// More than six kills, or a "round" too long to be one: Deathmatch-style play.
+    Deathmatch,
 }
 
 impl Round {
     pub fn kill(&mut self, n: u32, now: Instant, now_hns: i64) {
-        if self.first.is_none() {
-            self.first = Some((now, now_hns));
+        for _ in 0..n {
+            self.kills.push((now, now_hns));
         }
-        self.last = Some((now, now_hns));
-        self.kills += n;
+        if let Some(until) = self.deathmatch_until {
+            // Still in Deathmatch-style play: push the quiet deadline out.
+            if now < until {
+                self.deathmatch_until = Some(now + Duration::from_secs_f64(DEATHMATCH_QUIET_SECS));
+            }
+        }
     }
 
-    /// The round's (first, last, kills) once it's over, else None.
-    pub fn finished(&mut self, now: Instant) -> Option<(i64, i64, u32)> {
-        let (first, last) = (self.first?, self.last?);
-        let quiet = now.duration_since(last.0) >= Duration::from_secs(ROUND_GAP_SECS);
-        let long = now.duration_since(first.0) >= Duration::from_secs(MAX_ROUND_SECS);
-        (quiet || long).then(|| self.take()).flatten()
+    /// Once the round is over (or clearly isn't a round), what to do with it.
+    pub fn finished(&mut self, now: Instant, rules: &Rules) -> Option<RoundEnd> {
+        let first = self.kills.first()?.0;
+        let last = self.kills.last()?.0;
+        let quiet = now.duration_since(last).as_secs_f64() >= ROUND_GAP_SECS;
+        let too_long = now.duration_since(first).as_secs_f64() >= MAX_ROUND_SECS;
+        // Six would already be impossible in one 5v5 round; one spare kill allows for
+        // two quick rounds (Spike Rush) blurring together.
+        let too_many = self.kills.len() > DEATHMATCH_KILLS;
+        if rules.skip_deathmatch && (too_many || too_long) {
+            self.kills.clear();
+            self.deathmatch_until = Some(now + Duration::from_secs_f64(DEATHMATCH_QUIET_SECS));
+            return Some(RoundEnd::Deathmatch);
+        }
+        if !(quiet || too_long) {
+            return None;
+        }
+        Some(self.end(rules, now))
     }
 
-    pub fn take(&mut self) -> Option<(i64, i64, u32)> {
-        let r = Some((self.first?.1, self.last?.1, self.kills));
-        *self = Self::default();
-        r
+    /// Ends the round now (capture stopping): what to clip.
+    pub fn take(&mut self, rules: &Rules) -> Option<RoundEnd> {
+        if self.kills.is_empty() {
+            return None;
+        }
+        if rules.skip_deathmatch && self.kills.len() > DEATHMATCH_KILLS {
+            self.kills.clear();
+            return Some(RoundEnd::Deathmatch);
+        }
+        Some(self.end(rules, Instant::now()))
+    }
+
+    fn end(&mut self, rules: &Rules, now: Instant) -> RoundEnd {
+        let kills = std::mem::take(&mut self.kills);
+        if rules.skip_deathmatch && self.deathmatch_until.is_some_and(|t| now < t) {
+            return RoundEnd::Clips(Vec::new());
+        }
+        self.deathmatch_until = None;
+        let t0 = kills[0].0;
+        let times: Vec<f64> = kills.iter().map(|(t, _)| t.duration_since(t0).as_secs_f64()).collect();
+        RoundEnd::Clips(
+            highlights(&times, rules)
+                .into_iter()
+                .map(|(a, b)| (kills[a].1, kills[b].1, (b - a + 1) as u32))
+                .collect(),
+        )
     }
 }
 
@@ -482,6 +571,66 @@ mod tests {
         assert_eq!(kills, 2);
     }
 
+    fn rules() -> Rules {
+        Rules { min_kills: 3, max_gap_secs: 20.0, whole_round_from: 4, skip_deathmatch: true }
+    }
+
+    #[test]
+    fn picks_3ks_close_together_and_whole_4ks_and_aces() {
+        let r = rules();
+        assert_eq!(highlights(&[], &r), vec![]);
+        assert_eq!(highlights(&[0.0], &r), vec![], "single kill: nothing");
+        assert_eq!(highlights(&[0.0, 5.0], &r), vec![], "2K: nothing");
+        assert_eq!(highlights(&[0.0, 5.0, 12.0], &r), vec![(0, 2)], "3K close together");
+        assert_eq!(highlights(&[0.0, 30.0, 60.0], &r), vec![], "3K spread out: nothing");
+        assert_eq!(highlights(&[0.0, 30.0, 60.0, 90.0], &r), vec![(0, 3)], "4K: whole round");
+        assert_eq!(highlights(&[0.0, 2.0, 50.0, 80.0, 95.0], &r), vec![(0, 4)], "ace: whole round");
+        // 2 early kills, then a quick 3K later in the round
+        assert_eq!(highlights(&[0.0, 1.0, 40.0, 45.0, 50.0], &Rules { whole_round_from: 0, ..r }), vec![(2, 4)]);
+        // aces only as whole rounds, 2Ks clipped
+        let loose = Rules { min_kills: 2, max_gap_secs: 10.0, whole_round_from: 5, skip_deathmatch: true };
+        assert_eq!(highlights(&[0.0, 4.0, 30.0, 33.0], &loose), vec![(0, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn rounds_end_after_a_quiet_gap_and_deathmatch_is_skipped() {
+        let r = rules();
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        let hns = |s: f64| (s * 1e7) as i64;
+        // A round: 3 quick kills, then quiet.
+        let mut round = Round::default();
+        for s in [10.0, 14.0, 20.0] {
+            round.kill(1, at(s), hns(s));
+        }
+        assert_eq!(round.finished(at(40.0), &r), None, "not quiet long enough yet");
+        assert_eq!(round.finished(at(60.5), &r), Some(RoundEnd::Clips(vec![(hns(10.0), hns(20.0), 3)])));
+        assert_eq!(round.finished(at(61.0), &r), None, "nothing left");
+        // Deathmatch: kills keep coming, more than five.
+        for i in 0..7 {
+            let s = 100.0 + i as f64 * 8.0;
+            round.kill(1, at(s), hns(s));
+        }
+        assert_eq!(round.finished(at(150.0), &r), Some(RoundEnd::Deathmatch));
+        // A later quick 3K in the same deathmatch isn't clipped either.
+        for s in [200.0, 203.0, 206.0] {
+            round.kill(1, at(s), hns(s));
+        }
+        assert_eq!(round.finished(at(250.0), &r), Some(RoundEnd::Clips(vec![])));
+        // After a long quiet spell (the match ended), clips are back.
+        for s in [700.0, 703.0, 706.0] {
+            round.kill(1, at(s), hns(s));
+        }
+        assert_eq!(round.finished(at(750.0), &r), Some(RoundEnd::Clips(vec![(hns(700.0), hns(706.0), 3)])));
+        // With the skip off, a deathmatch burst is clipped as streaks.
+        let keep = Rules { skip_deathmatch: false, whole_round_from: 0, ..r };
+        for i in 0..7 {
+            let s = 800.0 + i as f64 * 5.0;
+            round.kill(1, at(s), hns(s));
+        }
+        assert_eq!(round.finished(at(900.0), &keep), Some(RoundEnd::Clips(vec![(hns(800.0), hns(830.0), 7)])));
+    }
+
     #[test]
     fn kills_already_in_the_feed_dont_count_after_alt_tab() {
         let t0 = Instant::now();
@@ -514,11 +663,18 @@ mod tests {
         // Files are "<clip>_<frame>.bmp" at 4 frames a second.
         let t0 = Instant::now();
         let mut tracker = Tracker::new();
+        let mut round = Round::default();
+        let rules = Rules { min_kills: 3, max_gap_secs: 20.0, whole_round_from: 4, skip_deathmatch: true };
         let (mut clip, mut frame, mut total) = (String::new(), 0u64, 0usize);
         for f in files {
             let name = f.file_name().unwrap().to_string_lossy().into_owned();
             let this = name.split('_').next().unwrap_or("").to_string();
             if this != clip {
+                if let Some(RoundEnd::Clips(c)) = round.take(&rules) {
+                    for (a, b, k) in c {
+                        println!("  -> {clip}: auto clip {k} kills, {:.1}s to {:.1}s", a as f64 / 1e7, b as f64 / 1e7);
+                    }
+                }
                 clip = this;
                 frame = 0;
                 tracker.reset();
@@ -543,10 +699,12 @@ mod tests {
                 rows = flipped;
             }
             let n = own_kills(&Image { w, h, stride, bgr: &rows }, h as f64 / 290.0);
-            let new = tracker.feed(&n, 32, t0 + Duration::from_millis(frame * 250));
+            let now = t0 + Duration::from_millis(frame * 250);
+            let new = tracker.feed(&n, 32, now);
             total += new;
             if new > 0 {
                 println!("{name}: +{new} kill(s) at {:.2} s, yours at {n:?}", frame as f64 / 4.0);
+                round.kill(new as u32, now, (frame * 2_500_000) as i64);
             }
         }
         println!("total kills: {total}");

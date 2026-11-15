@@ -35,10 +35,6 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-/// While watching for kills the replay buffer keeps this much (a whole round:
-/// before + up to MAX_ROUND_SECS of kills + the gap that ends the round).
-const KILL_KEEP_SECS: u32 = 210;
-
 /// Audio is shifted by this much relative to video (measured, see tests in
 /// the docs/README). Positive = audio later.
 const AUDIO_SHIFT_HNS: i64 = 0;
@@ -77,7 +73,7 @@ pub struct Status {
 }
 
 pub enum Event {
-    /// `kills` is set for clips saved automatically for a round with kills.
+    /// `kills` is set for clips saved automatically (auto clipped highlights).
     ClipSaved { path: PathBuf, size: u64, kills: Option<u32> },
     /// What a saved VALORANT clip shows: your kills, the map and your agent.
     ClipInfo { path: PathBuf, info: valorant::ClipInfo },
@@ -127,6 +123,7 @@ struct Recording {
 
 struct Shared {
     ffmpeg: Option<PathBuf>,
+    ffmpeg_note: String,
     cfg: Mutex<Capture>,
     clips_root: Mutex<String>,
     encoders: Mutex<Option<Vec<String>>>,
@@ -152,9 +149,11 @@ pub struct Engine {
 }
 
 impl Engine {
-    pub fn start(ffmpeg: Option<PathBuf>, cfg: Capture, clips_root: String, data_dir: PathBuf, events: Box<dyn Fn(Event) + Send + Sync>) -> Self {
+    /// `ffmpeg` = one that can capture (None: `ffmpeg_note` says why recording can't start).
+    pub fn start(ffmpeg: Option<PathBuf>, ffmpeg_note: String, cfg: Capture, clips_root: String, data_dir: PathBuf, events: Box<dyn Fn(Event) + Send + Sync>) -> Self {
         let s = Arc::new(Shared {
             ffmpeg,
+            ffmpeg_note,
             keep_secs: AtomicU32::new(cfg.replay_secs + 2),
             kill_keep: AtomicU32::new(0),
             data_dir,
@@ -215,7 +214,7 @@ impl Engine {
             std::thread::sleep(Duration::from_millis(400));
             let cfg = self.s.cfg.lock().unwrap().clone();
             let Some(ffmpeg) = self.s.ffmpeg.clone() else {
-                self.set_status("no-ffmpeg", "ffmpeg isn't installed — Clipit can't record yet.", None);
+                self.set_status("no-ffmpeg", &self.s.ffmpeg_note, None);
                 continue;
             };
             if self.s.encoders.lock().unwrap().is_none() {
@@ -393,7 +392,13 @@ impl Engine {
         self.s.job.add(&child);
 
         *self.s.ring.lock().unwrap() = ts::Ring::new(10_000_000 / plan.fps as i64);
-        self.s.kill_keep.store(if tap_pipe.is_some() { KILL_KEEP_SECS } else { 0 }, Ordering::SeqCst);
+        // While watching for kills the buffer must hold a whole highlight until the
+        // round is known to be over: the clip (≤ the size limit) + the quiet gap.
+        let kill_keep = {
+            let clip = (cfg.auto_max_mb as f64 * 8_000.0 / plan.kbps.max(1000) as f64).min(cfg.kill_before_secs as f64 + killfeed::MAX_ROUND_SECS + cfg.kill_after_secs as f64);
+            (clip + killfeed::ROUND_GAP_SECS + 5.0).ceil() as u32
+        };
+        self.s.kill_keep.store(if tap_pipe.is_some() { kill_keep } else { 0 }, Ordering::SeqCst);
         let keep = self.s.keep_secs.load(Ordering::SeqCst).max(self.s.kill_keep.load(Ordering::SeqCst)) as f64;
         *self.s.desktop.lock().unwrap() = PcmRing::new(keep + 5.0);
         *self.s.mic.lock().unwrap() = PcmRing::new(keep + 5.0);
@@ -572,16 +577,14 @@ impl Engine {
         // Foreground window and whether it's VALORANT (looked up once per window).
         let mut front: (isize, bool) = (0, false);
         while tap.read_exact(&mut frame).is_ok() {
-            let (on, before, after) = {
+            let (on, rules) = {
                 let c = self.s.cfg.lock().unwrap();
-                (c.enabled && c.auto_clip_kills, c.kill_before_secs as i64, c.kill_after_secs as i64)
+                (c.enabled && c.auto_clip_kills, Self::kill_rules(&c))
             };
             let now = Instant::now();
             let now_hns = now_hns();
-            if let Some((first, last, kills)) = round.finished(now) {
-                if let Err(e) = self.save_round(first - before * 10_000_000, last + after * 10_000_000, kills) {
-                    (self.s.events)(Event::ClipFailed(e));
-                }
+            if let Some(end) = round.finished(now, &rules) {
+                self.save_highlights(end);
             }
             if !on {
                 tracker.reset();
@@ -609,12 +612,42 @@ impl Engine {
             }
         }
         // Capture stopped (game closed, settings changed): keep a round in progress.
-        if let Some((first, last, kills)) = round.take() {
-            let (before, after) = {
-                let c = self.s.cfg.lock().unwrap();
-                (c.kill_before_secs as i64, c.kill_after_secs as i64)
-            };
-            let _ = self.save_round(first - before * 10_000_000, last + after * 10_000_000, kills);
+        let rules = Self::kill_rules(&self.s.cfg.lock().unwrap());
+        if let Some(end) = round.take(&rules) {
+            self.save_highlights(end);
+        }
+    }
+
+    fn kill_rules(c: &Capture) -> killfeed::Rules {
+        killfeed::Rules {
+            min_kills: c.auto_min_kills.clamp(1, 5),
+            max_gap_secs: c.auto_max_gap_secs as f64,
+            whole_round_from: c.auto_whole_round_from,
+            skip_deathmatch: c.auto_skip_deathmatch,
+        }
+    }
+
+    /// Longest auto clip in seconds: the size limit at the current bitrate.
+    fn auto_max_secs(&self, c: &Capture) -> f64 {
+        let kbps = self.s.run.lock().unwrap().as_ref().map(|r| r.plan.kbps).unwrap_or(20_000).max(1000);
+        (c.auto_max_mb as f64 * 8_000.0 / kbps as f64).max(10.0)
+    }
+
+    fn save_highlights(&self, end: killfeed::RoundEnd) {
+        let killfeed::RoundEnd::Clips(clips) = end else {
+            #[cfg(debug_assertions)]
+            println!("[killfeed] Deathmatch-style play: not clipping");
+            return;
+        };
+        let c = self.s.cfg.lock().unwrap().clone();
+        let max = (self.auto_max_secs(&c) * 1e7) as i64;
+        for (first, last, kills) in clips {
+            let end = last + c.kill_after_secs as i64 * 10_000_000;
+            // Over the size limit: keep the end (the last kills) and drop the start.
+            let start = (first - c.kill_before_secs as i64 * 10_000_000).max(end - max);
+            if let Err(e) = self.save_round(start, end, kills) {
+                (self.s.events)(Event::ClipFailed(e));
+            }
         }
     }
 

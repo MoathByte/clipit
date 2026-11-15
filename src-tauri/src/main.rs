@@ -32,6 +32,7 @@ struct AppState {
     /// Where the overlay's screen snapshot is written.
     overlay_dir: PathBuf,
     ffmpeg: Option<PathBuf>,
+    ffmpeg_info: Option<media::FfmpegInfo>,
     /// Limits how many ffmpeg thumbnail jobs run at once.
     thumb_slots: Arc<Semaphore>,
     http: reqwest::Client,
@@ -62,6 +63,9 @@ struct Status {
     clip_hotkey: HotkeyStatus,
     record_hotkey: HotkeyStatus,
     ffmpeg: Option<String>,
+    ffmpeg_version: String,
+    /// The ffmpeg found can record games (Windows Graphics Capture, ffmpeg 8+).
+    ffmpeg_capture: bool,
     has_art_key: bool,
     root_exists: bool,
     export_dir: String,
@@ -534,7 +538,7 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
                 capture::sound::play(capture::sound::Cue::Saved);
             }
             if let Some(k) = kills {
-                let _ = state.meta.set(&path.to_string_lossy(), &library::ClipInfo { kills: Some(k), ..Default::default() });
+                let _ = state.meta.set(&path.to_string_lossy(), &library::ClipInfo { kills: Some(k), auto: true, ..Default::default() });
             }
             let _ = app.emit("clip-saved", serde_json::json!({ "path": path, "size": size, "kills": kills }));
         }
@@ -647,6 +651,8 @@ fn get_status(app: AppHandle, state: State<AppState>) -> Status {
             .ffmpeg
             .as_ref()
             .map(|p| p.to_string_lossy().into_owned()),
+        ffmpeg_version: state.ffmpeg_info.as_ref().map(|f| f.version.clone()).unwrap_or_default(),
+        ffmpeg_capture: state.ffmpeg_info.as_ref().is_some_and(|f| f.capture),
         has_art_key: !cfg.steamgriddb_key.trim().is_empty(),
         root_exists: Path::new(&cfg.clips_root).is_dir(),
         // Empty = edits are saved next to the original clip (inside the library).
@@ -954,6 +960,36 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     app.restart();
 }
 
+/// Installs or updates ffmpeg with winget in a console window the user can watch.
+#[tauri::command]
+fn update_ffmpeg() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let script = "title Updating ffmpeg for Clipit & echo Installing the latest ffmpeg with winget... & echo. & \
+            (winget upgrade --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements || \
+             winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements) & \
+            echo. & echo Done. Go back to Clipit and click Restart Clipit. & pause";
+        std::process::Command::new("cmd.exe")
+            .args(["/c", script])
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("Couldn't start winget: {e}"))
+    }
+    #[cfg(not(windows))]
+    Err("Only on Windows".into())
+}
+
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    if let Some(s) = app.try_state::<AppState>() {
+        s.engine.shutdown();
+    }
+    app.restart();
+}
+
 /// Settings from the quick view: switch to the normal app window.
 #[tauri::command]
 fn open_app_window(app: AppHandle) {
@@ -1236,10 +1272,16 @@ fn main() {
                 ensure_clip_or_export(&stream_handle, &state, p).ok()
             }))?;
 
-            let ffmpeg = media::find_ffmpeg();
+            let ffmpeg_info = media::find_ffmpeg();
+            let ffmpeg = ffmpeg_info.as_ref().map(|f| f.path.clone());
+            let note = match &ffmpeg_info {
+                None => "ffmpeg isn't installed, so Clipit can't record yet.".to_string(),
+                Some(f) => format!("Your ffmpeg ({}) is too old to record games. Clipit needs ffmpeg 8 or newer.", if f.version.is_empty() { "unknown version" } else { &f.version }),
+            };
             let events_app = handle.clone();
             let engine = capture::Engine::start(
-                ffmpeg.clone(),
+                ffmpeg_info.as_ref().filter(|f| f.capture).map(|f| f.path.clone()),
+                note,
                 engine_settings(&config),
                 config.clips_root.clone(),
                 cache_dir.clone(),
@@ -1260,6 +1302,7 @@ fn main() {
                 art_dir,
                 overlay_dir,
                 ffmpeg,
+                ffmpeg_info,
                 thumb_slots: Arc::new(Semaphore::new(3)),
                 http,
                 watcher: Mutex::new(watcher),
@@ -1363,6 +1406,8 @@ fn main() {
             open_app_window,
             set_window_theme,
             app_version,
+            update_ffmpeg,
+            restart_app,
             check_update,
             install_update,
             autotest,

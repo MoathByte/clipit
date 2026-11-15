@@ -17,52 +17,121 @@ pub fn fnv1a(data: &[u8]) -> u64 {
     h
 }
 
-/// Locates ffmpeg: next to the app exe, on PATH, or in winget's install folders.
-pub fn find_ffmpeg() -> Option<PathBuf> {
+/// An ffmpeg found on this PC.
+#[derive(Clone, Debug)]
+pub struct FfmpegInfo {
+    pub path: PathBuf,
+    /// e.g. "9.0.2-full_build-www.gyan.dev"
+    pub version: String,
+    /// Has Windows Graphics Capture (`gfxcapture`, ffmpeg 8+), which recording needs.
+    pub capture: bool,
+}
+
+/// Every ffmpeg.exe we know where to look for: next to the app, CLIPIT_FFMPEG,
+/// PATH, and winget's install folders (newest first).
+fn ffmpeg_candidates() -> Vec<PathBuf> {
     let exe = "ffmpeg.exe";
-
-    if let Ok(me) = std::env::current_exe() {
-        if let Some(dir) = me.parent() {
-            let p = dir.join(exe);
-            if p.is_file() {
-                return Some(p);
-            }
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if p.is_file() && !out.iter().any(|q| q.as_os_str().eq_ignore_ascii_case(p.as_os_str())) {
+            out.push(p);
         }
+    };
+    if let Some(dir) = std::env::current_exe().ok().and_then(|me| me.parent().map(Path::to_path_buf)) {
+        push(dir.join(exe));
     }
-
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let p = dir.join(exe);
-            if p.is_file() {
-                return Some(p);
-            }
-        }
+    if let Some(p) = std::env::var_os("CLIPIT_FFMPEG") {
+        push(PathBuf::from(p));
     }
-
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let winget = PathBuf::from(local).join("Microsoft").join("WinGet");
-        let link = winget.join("Links").join(exe);
-        if link.is_file() {
-            return Some(link);
-        }
         // e.g. Packages\Gyan.FFmpeg_...\ffmpeg-9.0.2-full_build\bin\ffmpeg.exe
+        let mut builds: Vec<PathBuf> = Vec::new();
         if let Ok(pkgs) = std::fs::read_dir(winget.join("Packages")) {
             for pkg in pkgs.flatten() {
                 if !pkg.file_name().to_string_lossy().to_lowercase().contains("ffmpeg") {
                     continue;
                 }
-                if let Ok(builds) = std::fs::read_dir(pkg.path()) {
-                    for b in builds.flatten() {
-                        let p = b.path().join("bin").join(exe);
-                        if p.is_file() {
-                            return Some(p);
-                        }
-                    }
+                if let Ok(rd) = std::fs::read_dir(pkg.path()) {
+                    builds.extend(rd.flatten().map(|b| b.path().join("bin").join(exe)));
                 }
             }
         }
+        builds.sort();
+        builds.reverse(); // newest version folder first
+        for b in builds {
+            push(b);
+        }
+        push(winget.join("Links").join(exe));
     }
-    None
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            push(dir.join(exe));
+        }
+    }
+    out
+}
+
+fn quiet(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+/// Version and whether it can capture games.
+pub fn probe_ffmpeg(path: &Path) -> FfmpegInfo {
+    let version = quiet(Command::new(path).args(["-hide_banner", "-version"]))
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).lines().next().map(str::to_string))
+        .and_then(|l| l.strip_prefix("ffmpeg version ").map(|v| v.split_whitespace().next().unwrap_or("").to_string()))
+        .unwrap_or_default();
+    let capture = quiet(Command::new(path).args(["-hide_banner", "-filters"]))
+        .output()
+        .map(|o| filters_have_capture(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or(false);
+    FfmpegInfo { path: path.to_path_buf(), version, capture }
+}
+
+fn filters_have_capture(list: &str) -> bool {
+    list.lines().any(|l| l.split_whitespace().nth(1) == Some("gfxcapture"))
+}
+
+/// The ffmpeg to use: the first one that can capture games; else the first found
+/// (it still makes thumbnails and edits, and Clipit explains how to update it).
+pub fn find_ffmpeg() -> Option<FfmpegInfo> {
+    let mut first = None;
+    for p in ffmpeg_candidates() {
+        let info = probe_ffmpeg(&p);
+        if info.capture {
+            return Some(info);
+        }
+        first.get_or_insert(info);
+    }
+    first
+}
+
+#[cfg(test)]
+mod ffmpeg_tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_filter_list() {
+        let list = " T.. = Timeline support\n ... gfxcapture        |->V       Capture graphics/screen content as a video source\n ... ddagrab           |->V       Grab Windows Desktop images\n";
+        assert!(filters_have_capture(list));
+        assert!(!filters_have_capture(" ... ddagrab |->V Grab\n ... nullsrc |->V Null\n"));
+        assert!(!filters_have_capture(""));
+    }
+
+    /// Run with: cargo test this_pcs_ffmpeg -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn this_pcs_ffmpeg() {
+        for p in ffmpeg_candidates() {
+            println!("{:?}", probe_ffmpeg(&p));
+        }
+        println!("chosen: {:?}", find_ffmpeg());
+    }
 }
 
 fn thumb_name(clip: &Path) -> String {

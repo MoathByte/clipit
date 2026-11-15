@@ -53,6 +53,7 @@ impl ClipMeta {
         if info.agent.is_some() {
             e.agent = info.agent.clone();
         }
+        e.auto |= info.auto;
         let out = e.clone();
         self.save(&map)?;
         Ok(out)
