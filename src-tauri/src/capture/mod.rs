@@ -40,6 +40,18 @@ use std::os::windows::process::CommandExt;
 /// the docs/README). Positive = audio later.
 const AUDIO_SHIFT_HNS: i64 = 0;
 
+/// Longest wait, after the clip key, for the buffer to reach that moment.
+const MAX_CATCH_UP_MS: u64 = 3000;
+/// The buffer counts as up to date this close to the key press (encoder delay).
+const CAUGHT_UP_HNS: i64 = 4_000_000;
+/// A kill is counted in the killfeed about this long after it happens.
+const KILL_SEEN_LATE_HNS: i64 = 8_000_000;
+/// Kill times older than this are forgotten (no clip can reach that far back).
+const KILL_LOG_KEEP_HNS: i64 = 30 * 60 * 10_000_000;
+
+/// Shortest clip when clips don't repeat each other.
+const MIN_CLIP_SECS: f64 = 5.0;
+
 /// QPC clock in 100 ns units — the same clock WASAPI timestamps audio with.
 pub fn now_hns() -> i64 {
     #[cfg(windows)]
@@ -79,7 +91,8 @@ pub struct Status {
 
 pub enum Event {
     /// `kills` is set for clips saved automatically (auto clipped highlights).
-    ClipSaved { path: PathBuf, size: u64, kills: Option<u32> },
+    /// `kill_times`: your kills (seconds into the clip), when they were seen live.
+    ClipSaved { path: PathBuf, size: u64, kills: Option<u32>, kill_times: Option<Vec<f32>> },
     /// What a saved VALORANT clip shows: your kills, the map and your agent.
     ClipInfo { path: PathBuf, info: valorant::ClipInfo },
     ClipFailed(String),
@@ -171,6 +184,15 @@ struct Shared {
     cam_hold: AtomicBool,
     /// Last preview picture (device, JPEG), so adjustments preview instantly.
     preview: Mutex<Option<(String, Vec<u8>)>>,
+    /// QPC end of the last clip saved with the clip key (the next one starts there).
+    last_clip_end: Mutex<Option<i64>>,
+    /// Your kills seen live in the killfeed (QPC, 100 ns). Only times, never video:
+    /// a saved clip takes the ones inside it, the rest are dropped as they age.
+    kill_log: Mutex<Vec<i64>>,
+    /// Since when the killfeed has been watched without a break (None = not now).
+    kill_watch_since: Mutex<Option<i64>>,
+    /// One "running behind" warning per capture run is enough.
+    warned_lag: AtomicBool,
     status: Mutex<Status>,
     job: Job,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -204,6 +226,10 @@ impl Engine {
             cam_error: Mutex::new((String::new(), Instant::now())),
             cam_hold: AtomicBool::new(false),
             preview: Mutex::new(None),
+            last_clip_end: Mutex::new(None),
+            kill_log: Mutex::new(Vec::new()),
+            kill_watch_since: Mutex::new(None),
+            warned_lag: AtomicBool::new(false),
             status: Mutex::new(Status::default()),
             job: Job::new(),
             events,
@@ -615,7 +641,7 @@ impl Engine {
         // VALORANT kill clips: the capture also sends the killfeed corner, 4 frames a
         // second, to a pipe we read. Nothing else is read — no screen, no game.
         let watch_kills = cfg.enabled
-            && cfg.auto_clip_kills
+            && (cfg.auto_clip_kills || cfg.count_kills)
             && match (&source, &game) {
                 (Source::Window(_), Some((exe, _))) => exe == killfeed::VALORANT_EXE,
                 (Source::Monitor(_), _) => true,
@@ -766,8 +792,53 @@ impl Engine {
         if !cfg.enabled && !self.is_recording() {
             return Err("Instant replay is off.".into());
         }
-        let snap = self.s.ring.lock().unwrap().snapshot(cfg.replay_secs as f64).ok_or("Nothing recorded yet — try again in a second.")?;
-        self.save_snapshot(snap, None)
+        if self.s.ring.lock().unwrap().newest_hns().is_none() {
+            return Err("Nothing recorded yet — try again in a second.".into());
+        }
+        let pressed = now_hns();
+        let me = self.clone();
+        std::thread::spawn(move || {
+            // The buffer can run behind the game when the PC can't encode fast
+            // enough. Wait (a little) for the moment the key was pressed to arrive,
+            // so the clip always ends where you pressed.
+            let deadline = Instant::now() + Duration::from_millis(MAX_CATCH_UP_MS);
+            let behind = loop {
+                let newest = me.s.ring.lock().unwrap().newest_hns().unwrap_or(0);
+                let behind = pressed - newest;
+                if behind <= CAUGHT_UP_HNS || Instant::now() >= deadline {
+                    break behind;
+                }
+                std::thread::sleep(Duration::from_millis(40));
+            };
+            if behind > CAUGHT_UP_HNS && !me.s.warned_lag.swap(true, Ordering::SeqCst) {
+                (me.s.events)(Event::Warning(format!(
+                    "Your PC is recording about {:.0} s behind the game, so clips end a bit early. Lower the quality, frame rate or resolution in Settings → Recording.",
+                    behind as f64 / 1e7
+                )));
+            }
+            let snap = {
+                let ring = me.s.ring.lock().unwrap();
+                let mut last = me.s.last_clip_end.lock().unwrap();
+                // Start where the previous clip ended (but keep at least MIN_CLIP_SECS).
+                let floor = match (cfg.no_repeat, *last, ring.newest_hns()) {
+                    (true, Some(end), Some(newest)) => Some(end.min(newest - (MIN_CLIP_SECS * 1e7) as i64)),
+                    _ => None,
+                };
+                let snap = ring.snapshot_since(cfg.replay_secs as f64, floor);
+                if let Some(sn) = &snap {
+                    *last = Some(sn.end_hns());
+                }
+                snap
+            };
+            let res = match snap {
+                Some(snap) => me.save_snapshot(snap, None),
+                None => Err("Nothing recorded yet — try again in a second.".into()),
+            };
+            if let Err(e) = res {
+                (me.s.events)(Event::ClipFailed(e));
+            }
+        });
+        Ok(())
     }
 
     /// Saves a round of kills: from `start_hns` to `end_hns` on the capture clock.
@@ -799,6 +870,7 @@ impl Engine {
             None
         };
         let secs = (snap.end_hns() - snap.start_hns()) as f64 / 1e7;
+        let kill_times = self.live_kill_times(snap.start_hns(), snap.end_hns());
         let shared = self.s.clone();
         std::thread::spawn(move || {
             // The clip is saved right away, as without a hand cam.
@@ -806,14 +878,15 @@ impl Engine {
             drop(snap);
             let saved = res.is_ok();
             (shared.events)(match res {
-                Ok(size) => Event::ClipSaved { path: out.clone(), size, kills },
+                Ok(size) => Event::ClipSaved { path: out.clone(), size, kills, kill_times: kill_times.clone() },
                 Err(e) => Event::ClipFailed(e),
             });
             // Kills, map and agent are read from the clip before the camera is on it,
             // while the camera is added next to it.
             let analysis = (saved && analyze).then(|| {
                 let (ffmpeg, out, shared) = (ffmpeg.clone(), out.clone(), shared.clone());
-                std::thread::spawn(move || valorant::analyze_clip(&ffmpeg, &out, &shared.data_dir.join("valorant"), kills, &|c| shared.job.add(c)))
+                let times = kill_times.clone();
+                std::thread::spawn(move || valorant::analyze_clip(&ffmpeg, &out, &shared.data_dir.join("valorant"), kills, times, &|c| shared.job.add(c)))
             });
             let with_cam = match (&cam, saved) {
                 (Some((file, cam_start)), true) => add_handcam(&shared, &ffmpeg, &cfg.handcam, &video, &out, file, cam_start - game_start, secs),
@@ -835,6 +908,18 @@ impl Engine {
         Ok(())
     }
 
+    /// Your kills between two clock times, as seconds from `start` — only when the
+    /// killfeed was watched the whole time (else the clip is read after saving).
+    fn live_kill_times(&self, start: i64, end: i64) -> Option<Vec<f32>> {
+        let since = (*self.s.kill_watch_since.lock().unwrap())?;
+        // Watching starts with the capture: allow its first second.
+        if since > start + 10_000_000 {
+            return None;
+        }
+        let log = self.s.kill_log.lock().unwrap();
+        Some(log.iter().filter(|&&t| t >= start && t <= end).map(|&t| (t - start) as f32 / 1e7).collect())
+    }
+
     // ---------- watching for kills (VALORANT) ----------
 
     /// Reads the killfeed tap (4 frames a second of the killfeed corner, from our own
@@ -850,9 +935,9 @@ impl Engine {
         // Foreground window and whether it's VALORANT (looked up once per window).
         let mut front: (isize, bool) = (0, false);
         while tap.read_exact(&mut frame).is_ok() {
-            let (on, rules) = {
+            let (on, auto, rules) = {
                 let c = self.s.cfg.lock().unwrap();
-                (c.enabled && c.auto_clip_kills, Self::kill_rules(&c))
+                (c.enabled && (c.auto_clip_kills || c.count_kills), c.enabled && c.auto_clip_kills, Self::kill_rules(&c))
             };
             let now = Instant::now();
             let now_hns = now_hns();
@@ -861,6 +946,7 @@ impl Engine {
             }
             if !on {
                 tracker.reset();
+                *self.s.kill_watch_since.lock().unwrap() = None;
                 continue;
             }
             // Whole-monitor capture: only while VALORANT is in front on that monitor.
@@ -872,18 +958,28 @@ impl Engine {
                 }
                 if !front.1 || game::monitor_of(hwnd) != m {
                     tracker.reset();
+                    *self.s.kill_watch_since.lock().unwrap() = None;
                     continue;
                 }
             }
+            self.s.kill_watch_since.lock().unwrap().get_or_insert(now_hns);
             let img = killfeed::Image { w: encoder::TAP_W, h: encoder::TAP_H, stride: encoder::TAP_W * 3, bgr: &frame };
             let rows = killfeed::own_kills(&img, 1.0);
             let new = tracker.feed(&rows, 32, now) as u32;
             if new > 0 {
                 #[cfg(debug_assertions)]
                 println!("[killfeed] +{new} kill(s), yours in the feed at {rows:?}");
-                round.kill(new, now, now_hns);
+                // An entry is counted about 0.8 s after the kill (it fades in).
+                let mut log = self.s.kill_log.lock().unwrap();
+                log.extend(std::iter::repeat(now_hns - KILL_SEEN_LATE_HNS).take(new as usize));
+                log.retain(|t| now_hns - t < KILL_LOG_KEEP_HNS);
+                drop(log);
+                if auto {
+                    round.kill(new, now, now_hns);
+                }
             }
         }
+        *self.s.kill_watch_since.lock().unwrap() = None;
         // Capture stopped (game closed, settings changed): keep a round in progress.
         let rules = Self::kill_rules(&self.s.cfg.lock().unwrap());
         if let Some(end) = round.take(&rules) {
@@ -929,7 +1025,7 @@ impl Engine {
     /// Kills, map and agent in any VALORANT clip (reads the file, not the screen).
     pub fn analyze(&self, clip: &Path) -> Result<valorant::ClipInfo, String> {
         let ffmpeg = self.s.ffmpeg.clone().ok_or("ffmpeg isn't installed")?;
-        let info = valorant::analyze_clip(&ffmpeg, clip, &self.s.data_dir.join("valorant"), None, &|c| self.s.job.add(c));
+        let info = valorant::analyze_clip(&ffmpeg, clip, &self.s.data_dir.join("valorant"), None, None, &|c| self.s.job.add(c));
         if info.kill_times.is_none() {
             return Err("Couldn't read the clip".into());
         }
@@ -1457,6 +1553,60 @@ mod tests {
 
     /// The whole hand cam path: screen capture + camera → save a replay and a
     /// recording → both get the camera. Needs a camera:
+    /// Two clips a few seconds apart: the second starts where the first ended.
+    /// cargo test replay_real -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn replay_real() {
+        let dir = std::env::temp_dir().join(format!("clipit-rp-{}", std::process::id()));
+        let mut cfg = Capture::default();
+        cfg.target = "monitor".into();
+        cfg.desktop_audio = false;
+        cfg.mic = false;
+        cfg.sounds = false;
+        cfg.auto_clip_kills = false;
+        cfg.count_kills = false;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tx = Mutex::new(tx);
+        let ffmpeg = crate::media::find_ffmpeg().map(|f| f.path).unwrap();
+        let engine = Engine::start(Some(ffmpeg.clone()), String::new(), cfg, dir.join("clips").to_string_lossy().into_owned(), dir.join("data"), Box::new(move |ev| {
+            let msg = match ev {
+                Event::ClipSaved { path, .. } => format!("saved {}", path.display()),
+                Event::Warning(w) | Event::ClipFailed(w) => format!("problem {w}"),
+                _ => return,
+            };
+            let _ = tx.lock().unwrap().send(msg);
+        }));
+        let t = Instant::now();
+        while engine.status().buffered_secs < 15.0 {
+            assert!(t.elapsed() < Duration::from_secs(40), "capture didn't start: {:?}", engine.status());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let duration = |p: &str| -> f64 {
+            let o = Command::new(&ffmpeg).args(["-hide_banner", "-i", p]).output().unwrap();
+            let e = String::from_utf8_lossy(&o.stderr).to_string();
+            let d = e.split("Duration: ").nth(1).unwrap().split(',').next().unwrap().to_string();
+            let v: Vec<f64> = d.split(':').map(|x| x.parse().unwrap()).collect();
+            v[0] * 3600.0 + v[1] * 60.0 + v[2]
+        };
+        let pressed = Instant::now();
+        engine.save_replay().unwrap();
+        let first = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        println!("first: {first} after {:?}", pressed.elapsed());
+        let first = first.strip_prefix("saved ").expect("saved").to_string();
+        let d1 = duration(&first);
+        std::thread::sleep(Duration::from_secs(8));
+        engine.save_replay().unwrap();
+        let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        let second = second.strip_prefix("saved ").expect("saved").to_string();
+        let d2 = duration(&second);
+        println!("durations: {d1:.2} s, then {d2:.2} s");
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(d1 > 14.0, "{d1}");
+        assert!(d2 > 7.5 && d2 < 10.5, "second clip should be ~8-9 s: {d2}");
+    }
+
     /// CLIPIT_CAMERA="Iriun Webcam" cargo test handcam_real -- --ignored --nocapture
     #[test]
     #[ignore]

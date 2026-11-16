@@ -11,6 +11,8 @@ mod media;
 mod overlay;
 mod scanner;
 mod stream;
+mod usage;
+mod idle;
 
 use config::Config;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -120,6 +122,19 @@ struct Shown {
     /// "blur", "dim" or "none".
     animation: String,
     gen: u64,
+    /// A page to open on ("settings", "home"), when opened from the tray.
+    view: Option<String>,
+}
+
+/// Tray menu entries whose text changes.
+struct TrayItems {
+    record: MenuItem<tauri::Wry>,
+}
+
+fn set_tray_recording(app: &AppHandle, on: bool) {
+    if let Some(t) = app.try_state::<TrayItems>() {
+        let _ = t.record.set_text(if on { "Stop recording" } else { "Start recording" });
+    }
 }
 
 /// After this long in the tray, the window and its WebView2 engine are closed
@@ -204,13 +219,17 @@ fn open_quick(app: &AppHandle) {
             }
         }
     }
-    let shown = Shown { mode: "quick".into(), backdrop, blurred, animation, gen };
+    let shown = Shown { mode: "quick".into(), backdrop, blurred, animation, gen, view: None };
     show_or_wake(app, Present::Quick(rect), shown);
 }
 
 fn open_app(app: &AppHandle) {
+    open_app_on(app, None)
+}
+
+fn open_app_on(app: &AppHandle, view: Option<&str>) {
     let gen = VISIBILITY_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let shown = Shown { mode: "app".into(), backdrop: None, blurred: None, animation: "none".into(), gen };
+    let shown = Shown { mode: "app".into(), backdrop: None, blurred: None, animation: "none".into(), gen, view: view.map(str::to_string) };
     show_or_wake(app, Present::App, shown);
 }
 
@@ -457,6 +476,9 @@ fn toggle_main(app: &AppHandle) {
         1 if visible && ours => request_hide(app),
         // App window in front: the hotkey hides it.
         2 if visible && ours => hide_main(app),
+        // App window open but behind something or minimized: bring it forward
+        // instead of turning it into the quick view.
+        2 => open_app(app),
         _ if app_only => open_app(app),
         _ => open_quick(app),
     }
@@ -551,14 +573,18 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
     let Some(state) = app.try_state::<AppState>() else { return };
     let cfg_now = state.config.lock().unwrap().clone();
     match ev {
-        Event::ClipSaved { path, size, kills } => {
+        Event::ClipSaved { path, size, kills, kill_times } => {
             if cfg_now.capture.sounds {
                 capture::sound::play(capture::sound::Cue::Saved);
             }
-            if let Some(k) = kills {
-                let _ = state.meta.set(&path.to_string_lossy(), &library::ClipInfo { kills: Some(k), auto: true, ..Default::default() });
+            // `kills` is set for auto clips (the round's count); live kill times
+            // make the timeline marks show up right away.
+            let count = kills.or(kill_times.as_ref().map(|t| t.len() as u32));
+            if count.is_some() || kill_times.is_some() {
+                let info = library::ClipInfo { kills: count, auto: kills.is_some(), kill_times: kill_times.clone(), ..Default::default() };
+                let _ = state.meta.set(&path.to_string_lossy(), &info);
             }
-            let _ = app.emit("clip-saved", serde_json::json!({ "path": path, "size": size, "kills": kills }));
+            let _ = app.emit("clip-saved", serde_json::json!({ "path": path, "size": size, "kills": count, "auto": kills.is_some(), "kill_times": kill_times }));
         }
         Event::ClipInfo { path, info } => {
             let merged = state.meta.set(&path.to_string_lossy(), &info).unwrap_or(info);
@@ -572,14 +598,17 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
             let _ = app.emit("clip-updated", serde_json::json!({ "path": path, "size": size }));
         }
         Event::RecordingStarted(path) => {
+            set_tray_recording(app, true);
             set_tray_tooltip(app, "Clipit \u{2014} \u{25CF} recording");
             let _ = app.emit("recording", serde_json::json!({ "active": true, "path": path }));
         }
         Event::RecordingStopped { path, size } => {
+            set_tray_recording(app, false);
             set_tray_tooltip(app, "Clipit");
             let _ = app.emit("recording", serde_json::json!({ "active": false, "path": path, "size": size }));
         }
         Event::RecordingFailed(e) => {
+            set_tray_recording(app, false);
             set_tray_tooltip(app, "Clipit");
             let _ = app.emit("recording", serde_json::json!({ "active": false }));
             let _ = app.emit("capture-error", format!("Recording: {e}"));
@@ -911,6 +940,179 @@ fn delete_clip(state: State<AppState>, path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- several clips at once, folders, compression ----------
+
+fn worker(app: &AppHandle) -> Arc<idle::Worker> {
+    app.state::<Arc<idle::Worker>>().inner().clone()
+}
+
+/// Moves a clip and everything Clipit knows about it. Returns the new path.
+fn move_clip_to(app: &AppHandle, state: &AppState, path: &str, dir: &Path) -> Result<String, String> {
+    let old = ensure_clip(state, path)?;
+    if old.parent() == Some(dir) {
+        return Ok(path.to_string());
+    }
+    let name = old.file_name().ok_or("bad path")?;
+    let mut new = dir.join(name);
+    let mut n = 2;
+    while new.exists() {
+        let stem = old.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = old.extension().unwrap_or_default().to_string_lossy();
+        new = dir.join(format!("{stem} ({n}).{ext}"));
+        n += 1;
+    }
+    std::fs::rename(&old, &new).or_else(|_| std::fs::copy(&old, &new).and_then(|_| std::fs::remove_file(&old))).map_err(|e| format!("{}: {e}", name.to_string_lossy()))?;
+    let new_str = new.to_string_lossy().into_owned();
+    let _ = state.favorites.moved(path, &new_str);
+    let _ = state.reviewed.moved(path, &new_str);
+    state.meta.moved(path, Some(&new_str));
+    worker(app).moved(path, Some(&new_str));
+    Ok(new_str)
+}
+
+/// A new folder in the clips folder. Returns its name.
+#[tauri::command]
+fn create_folder(state: State<AppState>, name: String) -> Result<String, String> {
+    let name = library::validate_name(&name)?;
+    let root = PathBuf::from(state.config.lock().unwrap().clips_root.clone());
+    let dir = root.join(&name);
+    if dir.exists() {
+        return Err(format!("There's already a folder called {name}"));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't create the folder: {e}"))?;
+    Ok(name)
+}
+
+#[tauri::command]
+fn rename_folder(app: AppHandle, state: State<AppState>, from: String, to: String) -> Result<String, String> {
+    let to = library::validate_name(&to)?;
+    let root = PathBuf::from(state.config.lock().unwrap().clips_root.clone());
+    let (a, b) = (root.join(&from), root.join(&to));
+    if !a.is_dir() || from.contains(['\\', '/']) || from.starts_with('.') {
+        return Err("That folder isn't in your clips folder".into());
+    }
+    if b.exists() && !from.eq_ignore_ascii_case(&to) {
+        return Err(format!("There's already a folder called {to}"));
+    }
+    // Everything Clipit knows about the clips inside follows them.
+    let mut clips = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&a) {
+        clips.extend(rd.flatten().map(|e| e.path()).filter(|p| scanner::is_video(p)));
+    }
+    std::fs::rename(&a, &b).map_err(|e| format!("Couldn't rename the folder: {e}"))?;
+    for old in clips {
+        let new = b.join(old.file_name().unwrap_or_default());
+        let (o, n) = (old.to_string_lossy().into_owned(), new.to_string_lossy().into_owned());
+        let _ = state.favorites.moved(&o, &n);
+        let _ = state.reviewed.moved(&o, &n);
+        state.meta.moved(&o, Some(&n));
+        worker(&app).moved(&o, Some(&n));
+    }
+    Ok(to)
+}
+
+/// Removes an empty folder (one with clips in it is never deleted).
+#[tauri::command]
+fn delete_folder(state: State<AppState>, name: String) -> Result<(), String> {
+    let root = PathBuf::from(state.config.lock().unwrap().clips_root.clone());
+    let dir = root.join(&name);
+    if name.contains(['\\', '/']) || name.starts_with('.') || !dir.is_dir() {
+        return Err("That folder isn't in your clips folder".into());
+    }
+    std::fs::remove_dir(&dir).map_err(|_| "Only empty folders can be deleted. Move or delete its clips first.".to_string())
+}
+
+/// Moves clips into a folder of the clips folder. Returns the new paths (in order).
+#[tauri::command]
+fn move_clips(app: AppHandle, state: State<AppState>, paths: Vec<String>, folder: String) -> Result<Vec<String>, String> {
+    let root = PathBuf::from(state.config.lock().unwrap().clips_root.clone());
+    let dir = if folder.is_empty() { root } else { root.join(library::validate_name(&folder)?) };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    let mut errors = Vec::new();
+    for p in &paths {
+        match move_clip_to(&app, &state, p, &dir) {
+            Ok(n) => out.push(n),
+            Err(e) => {
+                out.push(p.clone());
+                errors.push(e);
+            }
+        }
+    }
+    if errors.len() == paths.len() && !paths.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn favorite_clips(state: State<AppState>, paths: Vec<String>, favorite: bool) -> Result<(), String> {
+    for p in &paths {
+        ensure_clip(&state, p)?;
+        state.favorites.set(p, favorite)?;
+    }
+    Ok(())
+}
+
+/// To the Recycle Bin. Returns the paths that were deleted.
+#[tauri::command]
+fn delete_clips(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Result<Vec<String>, String> {
+    let mut done = Vec::new();
+    for p in &paths {
+        let Ok(file) = ensure_clip(&state, p) else { continue };
+        if trash::delete(&file).is_ok() {
+            let _ = state.favorites.set(p, false);
+            let _ = state.reviewed.set(p, false);
+            state.meta.moved(p, None);
+            worker(&app).moved(p, None);
+            done.push(p.clone());
+        }
+    }
+    if done.is_empty() && !paths.is_empty() {
+        return Err("Couldn't delete them (in use?)".into());
+    }
+    Ok(done)
+}
+
+/// Copies several clips, to paste into Discord, a chat or a folder.
+#[tauri::command]
+fn copy_files(state: State<AppState>, paths: Vec<String>) -> Result<(), String> {
+    let files: Vec<String> = paths.iter().filter_map(|p| ensure_clip(&state, p).ok()).map(|p| p.to_string_lossy().into_owned()).collect();
+    let refs: Vec<&str> = files.iter().map(String::as_str).collect();
+    let _open = clipboard_win::Clipboard::new_attempts(10).map_err(|e| format!("Couldn't open the clipboard: {e}"))?;
+    clipboard_win::raw::empty().map_err(|e| format!("Couldn't clear the clipboard: {e}"))?;
+    clipboard_win::raw::set_file_list(&refs).map_err(|e| format!("Couldn't copy to clipboard: {e}"))
+}
+
+#[tauri::command]
+fn compress_state(app: AppHandle) -> idle::State {
+    worker(&app).state()
+}
+
+#[tauri::command]
+fn compress_seen(app: AppHandle) {
+    worker(&app).mark_seen()
+}
+
+/// Puts the originals back.
+#[tauri::command]
+fn compress_revert(app: AppHandle, paths: Vec<String>) -> Result<u32, String> {
+    let n = worker(&app).revert(&paths)?;
+    for p in &paths {
+        if let Ok(m) = std::fs::metadata(p) {
+            let _ = app.emit("clip-updated", serde_json::json!({ "path": p, "size": m.len(), "quiet": true }));
+        }
+    }
+    Ok(n)
+}
+
+/// Compress these clips now (low priority, never while a game runs).
+#[tauri::command]
+fn compress_clips(app: AppHandle, state: State<AppState>, paths: Vec<String>) -> Result<usize, String> {
+    let ok: Vec<String> = paths.into_iter().filter(|p| ensure_clip(&state, p).is_ok()).collect();
+    Ok(worker(&app).enqueue(ok))
+}
+
 /// Kills, map and agent in a VALORANT clip, read from the saved file.
 #[tauri::command]
 async fn analyze_clip(state: State<'_, AppState>, path: String) -> Result<library::ClipInfo, String> {
@@ -1042,6 +1244,79 @@ fn update_ffmpeg() -> Result<(), String> {
     Err("Only on Windows".into())
 }
 
+/// Installs (or updates) ffmpeg with winget, hidden, reporting progress as
+/// "ffmpeg-install" events ({ phase, percent }). Returns the new version once an
+/// ffmpeg that can record games is found.
+#[tauri::command]
+async fn install_ffmpeg(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || install_ffmpeg_blocking(&app)).await.map_err(|e| e.to_string())?
+}
+
+fn install_ffmpeg_blocking(app: &AppHandle) -> Result<String, String> {
+    use std::io::Read;
+    let emit = |phase: &str, percent: Option<u32>| {
+        let _ = app.emit("ffmpeg-install", serde_json::json!({ "phase": phase, "percent": percent }));
+    };
+    let found = media::find_ffmpeg();
+    if let Some(f) = found.as_ref().filter(|f| f.capture) {
+        return Ok(f.version.clone());
+    }
+    emit("download", None);
+    let verb = if found.is_some() { "upgrade" } else { "install" };
+    let mut cmd = std::process::Command::new("winget");
+    cmd.args([verb, "--id", "Gyan.FFmpeg", "-e", "--silent", "--disable-interactivity", "--accept-source-agreements", "--accept-package-agreements"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().map_err(|_| "Windows' package manager (winget) isn't available on this PC. Install \"App Installer\" from the Microsoft Store, then try again.".to_string())?;
+    let mut out = child.stdout.take().unwrap();
+    let mut text = String::new();
+    let mut buf = [0u8; 4096];
+    let mut last = None;
+    while let Ok(n) = out.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+        text.push_str(&String::from_utf8_lossy(&buf[..n]));
+        if let Some(p) = last_percent(&text) {
+            if last != Some(p) {
+                last = Some(p);
+                emit(if text.contains("installing") || text.contains("Installing") { "install" } else { "download" }, Some(p));
+            }
+        }
+        if text.len() > 64_000 {
+            text.drain(..32_000);
+        }
+    }
+    let _ = child.wait();
+    emit("check", None);
+    match media::find_ffmpeg() {
+        Some(f) if f.capture => Ok(f.version),
+        _ => {
+            let why = text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.contains('%') && !l.starts_with(['-', '\\', '|', '/'])).last().unwrap_or("").to_string();
+            Err(if why.is_empty() { "ffmpeg didn't install.".into() } else { format!("ffmpeg didn't install: {why}") })
+        }
+    }
+}
+
+/// An ffmpeg that can record games is installed now (after a manual install).
+#[tauri::command]
+fn ffmpeg_ready() -> bool {
+    media::find_ffmpeg().map(|f| f.capture).unwrap_or(false)
+}
+
+/// The last "NN%" in winget's progress output.
+fn last_percent(text: &str) -> Option<u32> {
+    let i = text.rfind('%')?;
+    let digits: String = text[..i].chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+    digits.parse().ok().filter(|p| *p <= 100)
+}
+
 #[tauri::command]
 fn restart_app(app: AppHandle) {
     if let Some(s) = app.try_state::<AppState>() {
@@ -1090,7 +1365,7 @@ fn set_favorite(state: State<AppState>, path: String, favorite: bool) -> Result<
 }
 
 #[tauri::command]
-fn rename_clip(state: State<AppState>, path: String, name: String) -> Result<scanner::Clip, String> {
+fn rename_clip(state_worker: AppHandle, state: State<AppState>, path: String, name: String) -> Result<scanner::Clip, String> {
     let old = ensure_clip(&state, &path)?;
     let folders = state.config.lock().unwrap().library_folders();
     let new = library::rename(&old, &name)?;
@@ -1101,6 +1376,9 @@ fn rename_clip(state: State<AppState>, path: String, name: String) -> Result<sca
     let _ = state.reviewed.moved(&path, &new_str);
     let game = scanner::game_of(&new, &folders);
     state.meta.moved(&path, Some(&new_str));
+    if let Some(w) = state_worker.try_state::<Arc<idle::Worker>>() {
+        w.moved(&path, Some(&new_str));
+    }
     let (favorites, reviewed, meta) = (state.favorites.snapshot(), state.reviewed.snapshot(), state.meta.snapshot());
     scanner::clip_from(&new, &game, &scanner::Flags { favorites: &favorites, reviewed: &reviewed, meta: &meta })
         .ok_or_else(|| "Renamed, but couldn't read the clip afterwards".into())
@@ -1255,6 +1533,7 @@ fn main() {
             open_default(app);
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1366,6 +1645,9 @@ fn main() {
                 meta: Arc::new(library::ClipMeta::load(meta_path)),
             });
 
+            app.manage(Arc::new(idle::Worker::load(app.path().app_config_dir()?.join("compressed.json"))));
+            idle::start(handle.clone());
+
             let keys_app = handle.clone();
             keys::init(move |role| {
                 // Back on the main thread, like the normal hotkeys.
@@ -1391,16 +1673,42 @@ fn main() {
             }
 
             // Tray icon: Clipit keeps running in the background so the hotkey works.
-            let open = MenuItem::with_id(app, "open", "Open Clipit", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
+            let clip = MenuItem::with_id(app, "clip", "Save clip", true, None::<&str>)?;
+            let record = MenuItem::with_id(app, "record", "Start recording", true, None::<&str>)?;
+            let open = MenuItem::with_id(app, "open", "View clips", true, None::<&str>)?;
+            let folder = MenuItem::with_id(app, "folder", "Open clips folder", true, None::<&str>)?;
+            let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            let usage_item = MenuItem::with_id(app, "usage", "CPU \u{2013} \u{00B7} RAM \u{2013}", false, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Clipit", true, None::<&str>)?;
+            let sep = || PredefinedMenuItem::separator(app);
+            let menu = Menu::with_items(app, &[&clip, &record, &sep()?, &open, &folder, &settings, &sep()?, &usage_item, &sep()?, &quit])?;
+            app.manage(TrayItems { record: record.clone() });
+            // Clipit's own CPU and RAM (with ffmpeg and the page), every few seconds.
+            std::thread::spawn(move || {
+                let mut meter = usage::Meter::default();
+                meter.read();
+                loop {
+                    std::thread::sleep(Duration::from_secs(3));
+                    let _ = usage_item.set_text(usage::label(meter.read()));
+                }
+            });
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().cloned().expect("app icon missing"))
                 .tooltip("Clipit")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => open_default(app),
+                    "clip" => on_role(app, 1),
+                    "record" => on_role(app, 2),
+                    "open" => open_app_on(app, Some("home")),
+                    "settings" => open_app_on(app, Some("settings")),
+                    "folder" => {
+                        if let Some(s) = app.try_state::<AppState>() {
+                            let root = s.config.lock().unwrap().clips_root.clone();
+                            let _ = std::fs::create_dir_all(&root);
+                            let _ = std::process::Command::new("explorer").arg(&root).spawn();
+                        }
+                    }
                     "quit" => {
                         // Finish a recording properly before quitting.
                         if let Some(s) = app.try_state::<AppState>() {
@@ -1471,6 +1779,19 @@ fn main() {
             app_version,
             update_ffmpeg,
             restart_app,
+            install_ffmpeg,
+            create_folder,
+            rename_folder,
+            delete_folder,
+            move_clips,
+            favorite_clips,
+            delete_clips,
+            copy_files,
+            compress_state,
+            compress_seen,
+            compress_revert,
+            compress_clips,
+            ffmpeg_ready,
             check_update,
             install_update,
             autotest,
@@ -1490,4 +1811,14 @@ fn main() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod install_tests {
+    #[test]
+    fn reads_winget_progress() {
+        assert_eq!(super::last_percent("  ██████        12%\r  ████████████  57%"), Some(57));
+        assert_eq!(super::last_percent("100%"), Some(100));
+        assert_eq!(super::last_percent("Found FFmpeg"), None);
+    }
 }

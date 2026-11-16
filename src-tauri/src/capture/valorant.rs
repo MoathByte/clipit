@@ -564,10 +564,11 @@ fn maps_in(f: &Frame, refs: &Refs, planner: &mut FftPlanner<f32>) -> Option<Vec<
 
 /// Kills (unless already known), map and agent for a saved clip. Never fails:
 /// what can't be told is left empty.
-pub fn analyze_clip(ffmpeg: &Path, clip: &Path, refs_dir: &Path, kills: Option<u32>, on_spawn: &dyn Fn(&std::process::Child)) -> ClipInfo {
-    // Kill times are always read from the clip itself so the timeline marks match
-    // the video; an auto clip keeps the count its round was saved for.
-    let times = super::killfeed::kill_times_in_clip(ffmpeg, clip, on_spawn).ok();
+/// `known_times`: kill times already seen live while recording (then the clip's
+/// killfeed isn't read again — only 8 frames for the map and agent).
+pub fn analyze_clip(ffmpeg: &Path, clip: &Path, refs_dir: &Path, kills: Option<u32>, known_times: Option<Vec<f32>>, on_spawn: &dyn Fn(&std::process::Child)) -> ClipInfo {
+    // Kill times match the video; an auto clip keeps the count its round was saved for.
+    let times = known_times.or_else(|| super::killfeed::kill_times_in_clip(ffmpeg, clip, on_spawn).ok());
     let kills = kills.or_else(|| times.as_ref().map(|t| t.len() as u32));
     let mut info = ClipInfo { kills, kill_times: times, ..Default::default() };
     let Some(refs) = refs(refs_dir) else { return info };
@@ -668,7 +669,7 @@ mod tests {
         let refs = std::env::var("CLIPIT_VALORANT_REFS").expect("CLIPIT_VALORANT_REFS");
         for clip in std::env::var("CLIPIT_INFO_CLIP").expect("CLIPIT_INFO_CLIP").split(';') {
             let t = std::time::Instant::now();
-            let info = analyze_clip(Path::new("ffmpeg"), Path::new(clip), Path::new(&refs), Some(0), &|_| {});
+            let info = analyze_clip(Path::new("ffmpeg"), Path::new(clip), Path::new(&refs), Some(0), None, &|_| {});
             println!("{clip}: {info:?} in {:?}", t.elapsed());
         }
     }

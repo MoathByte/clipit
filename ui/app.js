@@ -186,19 +186,28 @@ function openSettingsPage() {
   if (!isAppMode() && mode !== "quick") invoke("open_app_window").catch(() => {});
 }
 
-function go(view) {
+function go(view, opts = {}) {
   // Leaving Settings with unsaved changes asks first.
   if (state.view.name === "settings" && view.name !== "settings" && settingsDirty()) {
-    confirmLeaveSettings().then((ok) => { if (ok) { dropSettingsDraft(); go(view); } });
+    confirmLeaveSettings().then((ok) => { if (ok) { dropSettingsDraft(); go(view, opts); } });
     return;
   }
   if (state.view.name === "settings" && view.name !== "settings") dropSettingsDraft();
+  if (!opts.back && state.view && !sameView(state.view, view)) {
+    navStack.push({ view: state.view, scroll: main.scrollTop });
+    if (navStack.length > 50) navStack.shift();
+  }
+  if (!sameView(state.view, view)) { sel.paths.clear(); sel.anchor = null; }
   state.view = view;
   state.search = "";
   state.filterMap = state.filterAgent = "";
   state.filterKills = 0;
   main.scrollTop = 0;
   render();
+  syncSelection();
+  if (opts.back && opts.scroll) requestAnimationFrame(() => (main.scrollTop = opts.scroll));
+  animatePage();
+  updateBackBtn();
 }
 
 function render() {
@@ -212,6 +221,7 @@ function render() {
     return;
   }
   if (v.name === "review") return renderReview();
+  if (v.name === "compressed") return renderCompressed();
   if (!state.lib.root_exists || state.lib.clips.length === 0) return renderEmpty();
   if (v.name === "home") return renderHome();
   if (v.name === "all" || v.name === "favorites" || v.name === "auto") return renderClipsPage(null);
@@ -363,6 +373,17 @@ function renderHomeArt(name) {
 
 // ---------- clips page (game or all) ----------
 
+// The folder actions shown on a folder's page.
+function folderTools(game) {
+  return `<div class="folder-tools"><button type="button" class="btn sm ghost" data-folder-rename="${esc(game)}" title="Rename this folder">Rename</button><button type="button" class="btn sm ghost" data-folder-delete="${esc(game)}" title="Delete this folder (only when it's empty)">Delete folder</button></div>`;
+}
+main.addEventListener("click", (e) => {
+  const r = e.target.closest("[data-folder-rename]");
+  if (r) return renameFolder(r.dataset.folderRename);
+  const d = e.target.closest("[data-folder-delete]");
+  if (d) return deleteFolder(d.dataset.folderDelete);
+});
+
 function renderClipsPage(game) {
   main.innerHTML = `
     ${game ? `<header class="hero" id="hero"></header>` : `<div class="page" style="padding-bottom:0"><h1>${{ favorites: "Favorites", auto: "Auto clipped" }[state.view.name] || "All clips"}</h1></div>`}
@@ -378,6 +399,7 @@ function renderClipsPage(game) {
         <option value="big">Largest first</option>
       </select>
       <span class="result-count" id="result-count"></span>
+      ${game ? folderTools(game) : ""}
     </div>
     <div class="clip-area" id="clip-area"></div>`;
   if (game) renderHero();
@@ -489,9 +511,10 @@ function clipCard(c, i, opts) {
     : `<span class="clip-time">${esc(when)}</span>${opts.game ? `<span class="clip-game">${esc(c.game)}</span>` : ""}`)
     + (tags ? `<span class="clip-tags">${esc(tags)}</span>` : "");
   return `
-    <button class="clip${c.favorite ? " is-fav" : ""}" data-i="${i}">
+    <button class="clip${c.favorite ? " is-fav" : ""}${sel.paths.has(c.path) ? " selected" : ""}" data-i="${i}">
       <div class="thumb" data-path="${esc(c.path)}">
         <img alt="">
+        <span class="sel-btn" role="button" title="Select (Ctrl+click, Shift+click for a range)"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
         <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
         ${c.edited ? `<span class="edited-badge">Edited</span>` : ""}
         <span class="fav-btn" role="button" title="Favorite"><svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg></span>
@@ -598,14 +621,246 @@ const videoUrl = fileUrl;
 main.addEventListener("click", (e) => {
   const card = e.target.closest(".clip");
   if (!card) return;
-  const clip = state.list[Number(card.dataset.i)];
+  const i = Number(card.dataset.i);
+  const clip = state.list[i];
   if (e.target.closest(".fav-btn")) {
     e.stopPropagation();
     if (clip) toggleFavorite(clip);
     return;
   }
-  openPlayer(state.list, Number(card.dataset.i));
+  // Selecting: the tick, Ctrl/Shift+click, or any click once something is selected.
+  if (clip && (e.target.closest(".sel-btn") || e.ctrlKey || e.metaKey || e.shiftKey || sel.paths.size)) {
+    e.preventDefault();
+    selectClip(i, e.shiftKey);
+    return;
+  }
+  openPlayer(state.list, i);
 });
+
+// ---------- selecting several clips ----------
+
+const sel = { paths: new Set(), anchor: null };
+
+function selectClip(i, range) {
+  const c = state.list[i];
+  if (!c) return;
+  if (range && sel.anchor != null && state.list[sel.anchor]) {
+    const [a, b] = [Math.min(sel.anchor, i), Math.max(sel.anchor, i)];
+    for (let k = a; k <= b; k++) sel.paths.add(state.list[k].path);
+  } else if (sel.paths.has(c.path)) sel.paths.delete(c.path);
+  else sel.paths.add(c.path);
+  sel.anchor = i;
+  syncSelection();
+}
+
+function clearSelection() {
+  if (!sel.paths.size) return;
+  sel.paths.clear();
+  sel.anchor = null;
+  syncSelection();
+}
+
+function selectedClips() {
+  const byPath = new Map((state.lib ? state.lib.clips : []).map((c) => [c.path, c]));
+  return [...sel.paths].map((p) => byPath.get(p) || state.list.find((c) => c.path === p)).filter(Boolean);
+}
+
+function syncSelection() {
+  main.querySelectorAll(".clip").forEach((el) => {
+    const c = state.list[Number(el.dataset.i)];
+    el.classList.toggle("selected", !!c && sel.paths.has(c.path));
+  });
+  const n = sel.paths.size;
+  document.body.classList.toggle("selecting", n > 0);
+  $("#sel-bar").classList.toggle("on", n > 0);
+  $("#sel-count").textContent = `${n} selected`;
+  const clips = selectedClips();
+  $("#sel-fav-label").textContent = clips.length && clips.every((c) => c.favorite) ? "Unfavorite" : "Favorite";
+  if (!n) closeMoveMenu();
+}
+
+async function selAction(what, btn) {
+  const clips = selectedClips();
+  const paths = clips.map((c) => c.path);
+  const plural = (n) => `${n} clip${n === 1 ? "" : "s"}`;
+  try {
+    if (what === "clear") return clearSelection();
+    if (what === "all") { state.list.forEach((c) => sel.paths.add(c.path)); return syncSelection(); }
+    if (!paths.length) return;
+    if (what === "fav") {
+      const on = !clips.every((c) => c.favorite);
+      await invoke("favorite_clips", { paths, favorite: on });
+      paths.forEach((p) => findClips(p).forEach((c) => (c.favorite = on)));
+      renderSidebar();
+      rerenderKeepScroll();
+      syncSelection();
+      toast(on ? `Added ${plural(paths.length)} to Favorites` : `Removed ${plural(paths.length)} from Favorites`);
+    } else if (what === "move") {
+      openMoveMenu(btn);
+    } else if (what === "copy") {
+      await invoke("copy_files", { paths });
+      toast(`Copied ${plural(paths.length)}. Paste them in Discord or a folder with Ctrl+V.`);
+    } else if (what === "compress") {
+      const bg = (state.config && state.config.background) || {};
+      const keep = bg.keep_days ? `The originals are kept for ${bg.keep_days} days, so you can undo it.` : "The originals are deleted afterwards.";
+      if (!(await confirmDialog(`Compress ${plural(paths.length)}?`, `They're made smaller in the background (never while a game is running). ${keep}`, { yes: "Compress", danger: false }))) return;
+      await invoke("compress_clips", { paths });
+      clearSelection();
+      toast(`Compressing ${plural(paths.length)} in the background`);
+    } else if (what === "delete") {
+      if (!(await confirmDialog(`Delete ${plural(paths.length)}?`, "They go to the Recycle Bin."))) return;
+      const done = await invoke("delete_clips", { paths });
+      clearSelection();
+      await refreshLibrary();
+      toast(`Deleted ${plural(done.length)}`);
+    }
+  } catch (e) { toast(String(e), true); }
+}
+document.querySelectorAll("[data-sel]").forEach((b) => (b.onclick = (e) => { e.stopPropagation(); selAction(b.dataset.sel, b); }));
+
+// "Move to…": the folders in your clips folder, or a new one.
+function openMoveMenu(btn) {
+  const menu = $("#move-menu");
+  const games = state.lib ? state.lib.games.map((g) => g.name) : [];
+  menu.innerHTML = `<div class="menu-title">Move to</div>${games.map((g) => `<button class="menu-item" data-move="${esc(g)}">${gameIcon(g)}<span>${esc(g)}</span></button>`).join("")}
+    <div class="menu-sep"></div><button class="menu-item" data-move-new="1"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>New folder…</span></button>`;
+  menu.classList.remove("hidden");
+  const r = btn.getBoundingClientRect();
+  const h = menu.offsetHeight;
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, r.top - h - 8)}px`;
+  menu.querySelectorAll("[data-move]").forEach((b) => (b.onclick = () => moveSelected(b.dataset.move)));
+  const nb = menu.querySelector("[data-move-new]");
+  if (nb) nb.onclick = async () => {
+    closeMoveMenu();
+    const name = await newFolder();
+    if (name) moveSelected(name);
+  };
+}
+function closeMoveMenu() { $("#move-menu").classList.add("hidden"); }
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#move-menu") && !e.target.closest("[data-sel=move]")) closeMoveMenu(); });
+
+async function moveSelected(folder) {
+  closeMoveMenu();
+  const paths = selectedClips().map((c) => c.path);
+  try {
+    await invoke("move_clips", { paths, folder });
+    clearSelection();
+    await refreshLibrary();
+    toast(`Moved ${paths.length} clip${paths.length === 1 ? "" : "s"} to ${folder}`);
+  } catch (e) { toast(String(e), true); }
+}
+
+// ---------- folders ----------
+
+let promptResolve = null;
+function promptDialog(title, text, opts = {}) {
+  $("#prompt-title").textContent = title;
+  $("#prompt-text").textContent = text;
+  $("#prompt-yes").textContent = opts.yes || "OK";
+  const input = $("#prompt-input");
+  input.value = opts.value || "";
+  input.placeholder = opts.placeholder || "";
+  $("#prompt").classList.remove("hidden");
+  setTimeout(() => { input.focus(); input.select(); }, 30);
+  return new Promise((res) => (promptResolve = res));
+}
+function resolvePrompt(ok) {
+  $("#prompt").classList.add("hidden");
+  const v = $("#prompt-input").value.trim();
+  if (promptResolve) { promptResolve(ok && v ? v : null); promptResolve = null; }
+}
+$("#prompt-yes").onclick = () => resolvePrompt(true);
+$("#prompt-no").onclick = () => resolvePrompt(false);
+$("#prompt-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); resolvePrompt(true); }
+  if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); resolvePrompt(false); }
+});
+
+// Asks for a name and makes the folder. Returns its name (or null).
+async function newFolder() {
+  const name = await promptDialog("New folder", "A folder in your clips folder. Move clips into it from any page: select them, then Move to…", { yes: "Create", placeholder: "Funny moments" });
+  if (!name) return null;
+  try {
+    const made = await invoke("create_folder", { name });
+    await loadLibrary();
+    renderSidebar();
+    toast(`Made the folder ${made}`);
+    return made;
+  } catch (e) { toast(String(e), true); return null; }
+}
+$("#folder-new").onclick = async () => {
+  const name = await newFolder();
+  if (name) go({ name: "game", game: name });
+};
+
+async function renameFolder(from) {
+  const to = await promptDialog("Rename folder", `The clips inside stay, with their favorites and tags.`, { yes: "Rename", value: from });
+  if (!to || to === from) return;
+  try {
+    const made = await invoke("rename_folder", { from, to });
+    await loadLibrary();
+    renderSidebar();
+    if (state.view.name === "game" && state.view.game === from) state.view = { name: "game", game: made };
+    render();
+    toast(`Renamed to ${made}`);
+  } catch (e) { toast(String(e), true); }
+}
+
+async function deleteFolder(name) {
+  if (!(await confirmDialog(`Delete the folder ${name}?`, "Only an empty folder can be deleted.", { yes: "Delete" }))) return;
+  try {
+    await invoke("delete_folder", { name });
+    await loadLibrary();
+    renderSidebar();
+    if (state.view.name === "game" && state.view.game === name) go({ name: "home" });
+    else render();
+    toast(`Deleted the folder ${name}`);
+  } catch (e) { toast(String(e), true); }
+}
+
+// ---------- back ----------
+
+const navStack = [];
+const sameView = (a, b) => a && b && a.name === b.name && a.game === b.game;
+function updateBackBtn() {
+  $("#nav-back").disabled = !state.player && !navStack.length;
+}
+function goBack() {
+  if (!$("#prompt").classList.contains("hidden") || !$("#confirm").classList.contains("hidden")) return;
+  if (state.player) { closePlayer(); return; }
+  if (sel.paths.size) { clearSelection(); return; }
+  const prev = navStack.pop();
+  if (!prev) return updateBackBtn();
+  go(prev.view, { back: true, scroll: prev.scroll });
+}
+$("#nav-back").onclick = goBack;
+// The mouse's back button, Alt+Left.
+window.addEventListener("mouseup", (e) => { if (e.button === 3) { e.preventDefault(); goBack(); } });
+window.addEventListener("keydown", (e) => {
+  if (!$("#prompt").classList.contains("hidden")) return; // its own keys
+  const tag = e.target && e.target.tagName;
+  const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
+  if (e.altKey && e.key === "ArrowLeft") { e.preventDefault(); e.stopImmediatePropagation(); goBack(); return; }
+  if (!$("#whats-new").classList.contains("hidden") && (e.key === "Escape" || e.key === "Enter")) {
+    e.preventDefault(); e.stopImmediatePropagation(); closeWhatsNew(); return;
+  }
+  if (e.key === "Escape" && sel.paths.size && $("#confirm").classList.contains("hidden")) {
+    e.preventDefault(); e.stopImmediatePropagation(); clearSelection(); return;
+  }
+  if (!typing && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && !state.player && main.querySelector(".clip")) {
+    e.preventDefault(); e.stopImmediatePropagation();
+    state.list.forEach((c) => sel.paths.add(c.path));
+    syncSelection();
+  }
+}, true);
+
+// Pages slide in (unless motion is reduced).
+function animatePage(el = main) {
+  el.classList.remove("page-in");
+  void el.offsetWidth;
+  el.classList.add("page-in");
+}
 
 // ---------- favorites ----------
 
@@ -833,6 +1088,7 @@ video.addEventListener("volumechange", () => {
 });
 
 function openPlayer(list, index, opts) {
+  queueMicrotask(updateBackBtn);
   if (!list.length) return;
   const preview = $("#feature-video");
   if (preview) preview.pause();
@@ -953,7 +1209,7 @@ function ensureKillTimes() {
       .then((info) => setInfo(c.path, info))
       .catch(() => {})
       .finally(() => readingTimes.delete(c.path));
-  }, 900);
+  }, 150);
 }
 ["loadedmetadata", "durationchange"].forEach((ev) => video.addEventListener(ev, renderKillMarks));
 
@@ -1258,6 +1514,7 @@ function releaseVideo() {
 }
 
 function closePlayer() {
+  queueMicrotask(updateBackBtn);
   const review = state.player && state.player.review;
   if (review) {
     const { kept, deleted, skipped, freed } = review;
@@ -2067,7 +2324,10 @@ function applyTheme(mode, theme) {
   invoke("set_window_theme", { dark: resolved === "dark" }).catch(() => {});
   if (typeof drawAllWaves === "function") drawAllWaves();
 }
-const applySavedTheme = () => applyTheme(state.config && state.config.theme_mode, state.config && state.config.theme);
+const applySavedTheme = () => {
+  applyTheme(state.config && state.config.theme_mode, state.config && state.config.theme);
+  document.body.classList.toggle("reduce-motion", !!(state.config && state.config.reduce_motion));
+};
 darkQuery.addEventListener("change", () => { if (shownTheme && shownTheme.mode === "system") applyTheme(shownTheme.mode, shownTheme.theme); });
 
 function themeCards(selected, attr) {
@@ -2088,6 +2348,7 @@ const ICON = {
   hotkeys: `<svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>`,
   appearance: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>`,
   storage: `<svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></svg>`,
+  background: `<svg viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg>`,
   handcam: `<svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="m16 11 5-3v8l-5-3"/></svg>`,
   about: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>`,
 };
@@ -2100,6 +2361,7 @@ const SET_TABS = [
   ["hotkeys", "Hotkeys", "var(--c3)"],
   ["appearance", "Appearance", "var(--accent)"],
   ["storage", "Storage", "var(--c4)"],
+  ["background", "Space saver", "var(--c3)"],
   ["about", "About", "var(--faint)"],
 ];
 
@@ -2162,17 +2424,76 @@ const rangeB = (path, min, max, step) =>
 const fieldB = (path, placeholder, browse, type = "text") =>
   `<div class="field"><input type="${type}" data-bind="${path}" value="${esc(dv(path) || "")}" placeholder="${esc(placeholder)}" spellcheck="false">${browse ? `<button type="button" class="btn" data-browse="${path}">Browse</button>` : ""}</div>`;
 
+// ffmpeg install, run in the background with winget.
+// phase: null | "download" | "install" | "check" | "done" | "error"
+const ffi = { phase: null, percent: null, error: null, version: "" };
+const wizardOpen = () => !$("#wizard").classList.contains("hidden");
+
 function ffmpegFixRow() {
   const s = state.status || {};
   const old = s.ffmpeg && !s.ffmpeg_capture;
-  return row(old ? "Update ffmpeg" : "Install ffmpeg",
+  const wrap = (html) => `<div class="ffmpeg-row">${html}</div>`;
+  if (ffi.phase === "done") {
+    return wrap(row("ffmpeg is ready", wizardOpen() ? `Installed ffmpeg ${esc(ffi.version)}. Clipit restarts by itself when you finish setup.` : `Installed ffmpeg ${esc(ffi.version)}. Restarting Clipit…`,
+      `<span class="status-badge on">Ready</span>`));
+  }
+  if (ffi.phase && ffi.phase !== "error") {
+    const what = { download: "Downloading ffmpeg", install: "Installing ffmpeg", check: "Checking ffmpeg" }[ffi.phase] || "Installing ffmpeg";
+    return wrap(row(`${what}${ffi.percent != null ? ` · ${ffi.percent}%` : "…"}`, "This runs in the background. You can keep going.",
+      `<span class="ffmpeg-bar"><span style="width:${ffi.percent || 4}%"></span></span>`));
+  }
+  if (ffi.phase === "error") {
+    return wrap(row("ffmpeg didn't install", esc(ffi.error || ""),
+      `<button type="button" class="btn primary" data-ffmpeg="update">Try again</button><button type="button" class="btn" data-ffmpeg="window">Install in a window</button>`));
+  }
+  return wrap(row(old ? "Update ffmpeg" : "Install ffmpeg",
     old ? `Clipit found ffmpeg ${esc(s.ffmpeg_version || "")}, which can't record games. Recording needs ffmpeg 8 or newer.` : "Clipit records with ffmpeg, which isn't installed yet.",
-    `<button type="button" class="btn primary" data-ffmpeg="update">${old ? "Update" : "Install"}</button><button type="button" class="btn" data-ffmpeg="restart">Restart Clipit</button>`);
+    `<button type="button" class="btn primary" data-ffmpeg="update">${old ? "Update" : "Install"}</button>`));
 }
+
+function refreshFfmpegRows() {
+  document.querySelectorAll(".ffmpeg-row").forEach((el) => {
+    const t = document.createElement("div");
+    t.innerHTML = ffmpegFixRow();
+    const fresh = t.firstElementChild;
+    el.replaceWith(fresh);
+    wireFfmpegButtons(fresh);
+  });
+}
+
+async function startFfmpegInstall() {
+  if (ffi.phase && ffi.phase !== "error") return;
+  Object.assign(ffi, { phase: "download", percent: null, error: null });
+  refreshFfmpegRows();
+  try {
+    ffi.version = await invoke("install_ffmpeg");
+    ffi.phase = "done";
+    refreshFfmpegRows();
+    // Recording starts with the new ffmpeg after a restart. During setup that
+    // waits until setup is finished.
+    if (!wizardOpen()) restartForFfmpeg();
+  } catch (e) {
+    Object.assign(ffi, { phase: "error", error: String(e) });
+    refreshFfmpegRows();
+  }
+}
+
+function restartForFfmpeg() {
+  toast("ffmpeg is ready. Restarting Clipit to start recording…");
+  setTimeout(() => invoke("restart_app").catch(() => {}), 2500);
+}
+
+listen("ffmpeg-install", (e) => {
+  const { phase, percent } = e.payload || {};
+  if (!ffi.phase || ffi.phase === "done" || ffi.phase === "error") return;
+  ffi.phase = phase;
+  ffi.percent = percent;
+  refreshFfmpegRows();
+});
 
 function capStatusRow(st) {
   if (!st) return row("Recorder", "Checking…", "");
-  if (st.state === "no-ffmpeg") return `<div id="cap-status">${row(esc(st.message), "Install or update it with Windows' own package manager (winget), then restart Clipit.", `<span class="status-badge bad">Stopped</span>`)}${ffmpegFixRow()}</div>`;
+  if (st.state === "no-ffmpeg") return `<div id="cap-status">${row(esc(st.message), "Clipit installs it for you with Windows' own package manager (winget).", `<span class="status-badge bad">Stopped</span>`)}${ffmpegFixRow()}</div>`;
   const badge = st.recording ? `<span class="status-badge bad">Recording</span>` : st.state === "buffering" ? `<span class="status-badge on">Ready</span>` : st.state === "error" || st.state === "no-ffmpeg" ? `<span class="status-badge bad">Stopped</span>` : `<span class="status-badge">${esc({ waiting: "Waiting", off: "Off", starting: "Starting" }[st.state] || st.state)}</span>`;
   const sub = st.state === "buffering" ? `${esc(st.encoder)} · ${esc(st.detail)} · ${fmtSize(st.ram_bytes)} in RAM` : "";
   return `<div class="row" id="cap-status"><div class="row-text"><div class="row-label">${esc(st.message)}</div>${sub ? `<div class="row-sub">${sub}</div>` : ""}</div><div class="row-control">${badge}</div></div>`;
@@ -2227,6 +2548,7 @@ function settingsPane(tab) {
       ${group("Instant replay", [
         row("Instant replay", "Always keep the last moments ready to save.", toggle("capture.enabled")),
         row("Replay length", "", segB("capture.replay_secs", LENGTHS.filter((l) => l[0] >= 30 && l[0] <= 300), true)),
+        row("Don't repeat footage", "Clip twice in a row and the second clip starts where the first one ended (at least 5 s), instead of saving the whole replay again.", toggle("capture.no_repeat")),
       ], { id: "ram-hint", text: esc(ramText(c)) })}
       ${group("What to capture", [
         row("Source", c.target === "monitor" ? "Everything on one screen." : "Only the game. Nothing runs until a game is in focus.", segB("capture.target", [["game", "Game window"], ["monitor", "Whole monitor"]])),
@@ -2294,12 +2616,15 @@ function settingsPane(tab) {
   if (tab === "appearance") {
     return `<h2>Appearance</h2><p class="lede">Changes show right away. Save to keep them.</p>
       ${group("Mode", [row("Mode", "", segB("theme_mode", [["dark", "Dark"], ["light", "Light"], ["system", "Match Windows"]]))])}
+      ${group("Motion", [row("Reduce motion", "Turns off the small animations inside the app (buttons, pages, cards). Also on when Windows' animation effects are off.", toggle("reduce_motion"))])}
       <div class="group"><div class="group-title">Theme</div>${themeCards(d.theme, "data-theme-pick")}</div>`;
   }
   if (tab === "handcam") return handcamPane(d);
+  if (tab === "background") return backgroundPane(d);
   if (tab === "storage") {
     return `<h2>Storage</h2><p class="lede">Where clips live.</p>
       ${group("Clips folder", [`<div class="row stack">${fieldB("clips_root", "Choose a folder", true)}<div class="row-sub">${st.root_exists ? "Folder found. New clips go here, each game in its own folder." : "Folder not found yet. It's created when the first clip is saved."}</div></div>`], "Every folder inside it shows up as a game, even before it has clips. Clips in folders inside those count for that game.")}
+      ${yourFoldersGroup()}
       ${foldersGroup(d)}
       ${group("Exports", [`<div class="row stack">${fieldB("export_dir", "Next to the original clip (recommended)", true)}</div>`], "Edited clips are saved next to the original so they show up in your library. Pick a folder only if you'd rather keep them somewhere else; they won't appear in the library then.")}
       ${group("Game artwork", [`<div class="row stack">${fieldB("steamgriddb_key", "SteamGridDB API key", false, "password")}</div>`, row("Download artwork again", st.has_art_key ? "Uses the saved key." : "Save a key first.", `<button type="button" class="btn" id="set-refresh-art">Refresh</button>`)], "Covers and logos come from SteamGridDB. Make a free account and copy your API key from steamgriddb.com/profile/preferences/api.")}
@@ -2324,14 +2649,30 @@ function settingsPane(tab) {
 function wireFfmpegButtons(root) {
   root.querySelectorAll("[data-ffmpeg]").forEach((b) => (b.onclick = async () => {
     try {
-      if (b.dataset.ffmpeg === "update") {
+      if (b.dataset.ffmpeg === "update") startFfmpegInstall();
+      else if (b.dataset.ffmpeg === "window") {
         await invoke("update_ffmpeg");
-        toast("A window is installing ffmpeg. When it says Done, click Restart Clipit.");
-      } else {
-        await invoke("restart_app");
-      }
+        toast("A window is installing ffmpeg. When it says Done, Clipit restarts by itself.");
+        waitForWindowInstall();
+      } else await invoke("restart_app");
     } catch (e) { toast(String(e), true); }
   }));
+}
+
+// After "Install in a window": look for the new ffmpeg every few seconds.
+let ffWatch = 0;
+function waitForWindowInstall() {
+  clearInterval(ffWatch);
+  let tries = 0;
+  ffWatch = setInterval(async () => {
+    if (++tries > 200) return clearInterval(ffWatch);
+    try {
+      if (!(await invoke("ffmpeg_ready"))) return;
+    } catch { return; }
+    clearInterval(ffWatch);
+    ffi.phase = null;
+    startFfmpegInstall(); // finds it right away and reports "ready"
+  }, 3000);
 }
 
 // ---------- hand cam settings ----------
@@ -2630,6 +2971,15 @@ function wireHandcam() {
 
 // ---------- storage: extra folders ----------
 
+// The folders in your clips folder (the same ones as in the sidebar).
+function yourFoldersGroup() {
+  const games = state.lib ? state.lib.games : [];
+  const rows = games.map((g) => row(`${gameIcon(g.name)}<span>${esc(g.name)}</span>`, `${g.clip_count} clip${g.clip_count === 1 ? "" : "s"} · ${fmtSize(g.total_size)}`,
+    `<button type="button" class="btn sm ghost" data-folder-rename="${esc(g.name)}">Rename</button><button type="button" class="btn sm ghost" data-folder-delete="${esc(g.name)}" ${g.clip_count ? "disabled title=\"Only empty folders can be deleted\"" : ""}>Delete</button>`, "folder-row"));
+  rows.push(row("New folder", "Group clips your way: funny moments, clutches, a friend's plays…", `<button type="button" class="btn" id="set-folder-new">New folder</button>`));
+  return group("Your folders", rows, "These are real folders inside your clips folder, so they look the same in File Explorer. To move clips, select them on any page and choose Move to….");
+}
+
 function foldersGroup(d) {
   const lib = state.lib || {};
   const info = (p) => (lib.folders || []).find((f) => f.path.toLowerCase() === p.toLowerCase().replace(/[\\/]+$/, ""));
@@ -2643,6 +2993,8 @@ function foldersGroup(d) {
 }
 
 function wireFolders() {
+  const nf = $("#set-folder-new");
+  if (nf) nf.onclick = async () => { if (await newFolder()) rerenderSettings(); };
   const add = $("#folder-add");
   if (add) add.onclick = async () => {
     try {
@@ -2663,6 +3015,163 @@ function wireFolders() {
 // ---------- updates ----------
 
 const upd = { checking: false, checked: false, available: null, installing: false, progress: null, error: null };
+
+// ---------- what's new ----------
+// Shown once, the first time Clipit opens after an update: sections of
+// [title, one line]. Keep it short and plain.
+const WHATS_NEW = {
+  "0.13.0": [
+    ["New", [
+      ["Folders", "Press + next to Folders to make your own (\u201cFunny moments\u201d, \u201cClutches\u201d\u2026). Rename or delete them from the folder's page."],
+      ["Select several clips", "Tick clips (or Ctrl/Shift+click) to favorite, move, copy, compress or delete them all at once."],
+      ["Space saver", "VALORANT clips without kills are made smaller while you're away from the PC. You get a notice with what was cleared, and can undo it. Settings \u2192 Space saver."],
+      ["Back button", "Top left, or your mouse's back button, or Alt+Left."],
+      ["Tray menu", "Right-click the tray icon: save a clip, record, open your clips or settings, and see Clipit's CPU and RAM."],
+      ["No repeated footage", "Clip twice in a row and the second clip starts where the first one ended."],
+    ]],
+    ["Faster", [
+      ["Kill marks show up instantly", "Kills are noted the moment they happen while you play, so new clips have their marks right away. Older clips get theirs while your PC is idle."],
+      ["Clips end where you pressed", "If your PC records a bit behind the game, Clipit waits a moment for it, so you never have to press twice."],
+      ["ffmpeg installs by itself", "First-time setup gets ffmpeg in the background and restarts Clipit when it's ready."],
+    ]],
+    ["Fixed", [
+      ["Alt+Z with the window open", "No more Settings inside the quick view: Alt+Z brings the window forward."],
+    ]],
+    ["Feels better", [
+      ["Animations", "Buttons, cards and pages move a little. Turn it off in Settings \u2192 Appearance \u2192 Reduce motion."],
+    ]],
+  ],
+};
+
+function maybeShowWhatsNew() {
+  const c = state.config;
+  if (!c || !APP_VERSION || c.seen_version === APP_VERSION) return;
+  const items = WHATS_NEW[APP_VERSION];
+  // A fresh install (setup not done) just remembers the version.
+  if (c.setup_done && items) {
+    $("#wn-version").textContent = `Clipit ${APP_VERSION}`;
+    $("#wn-list").innerHTML = items.map(([section, list]) => `<li class="wn-section">${esc(section)}</li>${list.map(([t, d]) => `<li><b>${esc(t)}</b><span>${esc(d)}</span></li>`).join("")}`).join("");
+    $("#whats-new").classList.remove("hidden", "closing");
+  }
+  patchConfig({ seen_version: APP_VERSION });
+}
+function closeWhatsNew() {
+  const m = $("#whats-new");
+  if (m.classList.contains("hidden")) return;
+  m.classList.add("closing");
+  setTimeout(() => m.classList.add("hidden"), document.body.classList.contains("reduce-motion") ? 0 : 220);
+}
+$("#wn-ok").onclick = closeWhatsNew;
+$("#whats-new").addEventListener("click", (e) => { if (e.target.id === "whats-new") closeWhatsNew(); });
+
+// ---------- space saver (compression) ----------
+
+const comp = { entries: [], busy: null, queued: 0, picked: new Set() };
+
+async function loadCompress() {
+  try { Object.assign(comp, await invoke("compress_state")); } catch {}
+}
+
+function compressNotice() {
+  const unseen = comp.entries.filter((e) => !e.seen);
+  const box = $("#compress-notice");
+  if (!unseen.length || state.view.name === "compressed") { box.classList.add("hidden"); return; }
+  const saved = unseen.reduce((s, e) => s + (e.original - e.size), 0);
+  $("#cn-title").textContent = `Cleared ${fmtSize(saved)}`;
+  $("#cn-sub").textContent = `${unseen.length} VALORANT clip${unseen.length === 1 ? "" : "s"} without kills ${unseen.length === 1 ? "was" : "were"} made smaller.`;
+  box.classList.remove("hidden");
+}
+$("#cn-close").onclick = () => { $("#compress-notice").classList.add("hidden"); invoke("compress_seen").catch(() => {}); comp.entries.forEach((e) => (e.seen = true)); };
+$("#cn-see").onclick = () => { $("#compress-notice").classList.add("hidden"); go({ name: "compressed" }); };
+
+listen("compress-done", async (e) => {
+  const p = e.payload || {};
+  if (!p.count && p.failed && p.failed.length) toast("Couldn't compress: " + p.failed.join("; "), true);
+  await loadCompress();
+  compressNotice();
+  if (p.count) refreshLibrary();
+  if (state.view.name === "compressed") renderCompressed();
+});
+listen("compress-progress", (e) => {
+  Object.assign(comp, { busy: e.payload.busy, queued: e.payload.queued });
+  const s = $("#comp-busy");
+  if (s) s.textContent = comp.busy || "";
+});
+
+function renderCompressed() {
+  const list = [...comp.entries].sort((a, b) => b.at_ms - a.at_ms);
+  const saved = list.reduce((s, e) => s + (e.original - e.size), 0);
+  const byPath = new Map((state.lib ? state.lib.clips : []).map((c) => [c.path.toLowerCase(), c]));
+  const bg = (state.config && state.config.background) || {};
+  const day = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" });
+  main.innerHTML = `
+    <div class="page compressed-page">
+      <h1>Compressed clips</h1>
+      <p class="lede">${list.length ? `${list.length} clip${list.length === 1 ? "" : "s"}, ${fmtSize(saved)} smaller in total.` : "Nothing compressed yet."} ${bg.compress ? "VALORANT clips without kills are made smaller while you're away." : "Automatic compression is off."} <button class="link" id="comp-settings">Settings</button></p>
+      <div class="comp-tools">
+        <button class="btn sm ghost" id="comp-all">${comp.picked.size && comp.picked.size === list.length ? "Select none" : "Select all"}</button>
+        <button class="btn sm" id="comp-undo" ${comp.picked.size ? "" : "disabled"}>Undo compression (${comp.picked.size})</button>
+        <span class="faint" id="comp-busy">${esc(comp.busy || "")}</span>
+      </div>
+      <div class="list comp-list">
+        ${list.map((e) => {
+          const c = byPath.get(e.path.toLowerCase());
+          const name = e.path.split(/[\\/]/).pop();
+          const keptTill = e.backup ? `Original kept until ${day.format(new Date(e.at_ms + (bg.keep_days || 0) * 86400000))}` : "Original no longer kept";
+          return `<label class="row comp-row${e.backup ? "" : " no-undo"}">
+            <input type="checkbox" data-comp="${esc(e.path)}" ${comp.picked.has(e.path) ? "checked" : ""} ${e.backup ? "" : "disabled"}>
+            <div class="row-text"><div class="row-label">${esc(c ? c.title || name : name)}</div><div class="row-sub">${c ? esc(c.game) + " · " : ""}${keptTill}</div></div>
+            <div class="comp-size"><s>${fmtSize(e.original)}</s> \u2192 <b>${fmtSize(e.size)}</b></div>
+          </label>`;
+        }).join("")}
+      </div>
+    </div>`;
+  invoke("compress_seen").catch(() => {});
+  comp.entries.forEach((e) => (e.seen = true));
+  $("#compress-notice").classList.add("hidden");
+  $("#comp-settings").onclick = () => { setUI.tab = "background"; go({ name: "settings" }); };
+  $("#comp-all").onclick = () => {
+    const undoable = list.filter((e) => e.backup).map((e) => e.path);
+    if (comp.picked.size === undoable.length) comp.picked.clear(); else undoable.forEach((p) => comp.picked.add(p));
+    renderCompressed();
+  };
+  main.querySelectorAll("[data-comp]").forEach((b) => (b.onchange = () => {
+    if (b.checked) comp.picked.add(b.dataset.comp); else comp.picked.delete(b.dataset.comp);
+    $("#comp-undo").disabled = !comp.picked.size;
+    $("#comp-undo").textContent = `Undo compression (${comp.picked.size})`;
+  }));
+  $("#comp-undo").onclick = async () => {
+    const paths = [...comp.picked];
+    try {
+      const n = await invoke("compress_revert", { paths });
+      comp.picked.clear();
+      await loadCompress();
+      await refreshLibrary();
+      renderCompressed();
+      toast(`Put back the original of ${n} clip${n === 1 ? "" : "s"}`);
+    } catch (e) { toast(String(e), true); }
+  };
+}
+
+function backgroundPane(d) {
+  const b = d.background || {};
+  const count = comp.entries.length;
+  const saved = comp.entries.reduce((s, e) => s + (e.original - e.size), 0);
+  return `<h2>Space saver</h2><p class="lede">Work Clipit does only while you're away from the PC and no game is running. It stops the moment you come back or start a game.</p>
+    ${group("Kill marks for older clips", [
+      row("Find kills in older clips", "Reads VALORANT clips saved before kill marks existed, so their timeline shows kills instantly too. New clips get them while you play.", toggle("background.index_kills")),
+    ])}
+    ${group("Compress clips without kills", [
+      row("Compress automatically", "VALORANT clips with no kills of yours are re-encoded smaller. Favorites and edited clips are left alone.", toggle("background.compress")),
+      row("How small", "", segB("background.quality", [["light", "Light · ~40% smaller"], ["balanced", "Balanced · ~60%"], ["small", "Small · ~75%"]])),
+      row("Only clips older than", "Gives you time to watch and favorite new clips first.", selectB("background.min_age_hours", [[1, "1 hour"], [24, "1 day"], [72, "3 days"], [168, "1 week"], [720, "30 days"]], true)),
+      row("Keep the originals", "So you can undo it. They sit in a hidden folder on the same drive and are deleted after this.", selectB("background.keep_days", [[0, "Don't keep"], [1, "1 day"], [3, "3 days"], [7, "7 days"], [30, "30 days"]], true)),
+      row("Skip favorites", "", toggle("background.skip_favorites")),
+      row("Wait until I'm away for", "No mouse or keyboard for this long.", selectB("background.away_minutes", [[0, "Don't wait (only no game)"], [2, "2 minutes"], [5, "5 minutes"], [15, "15 minutes"], [30, "30 minutes"]], true)),
+      row("Notify me", "A Windows notification saying how much space was cleared.", toggle("background.notify")),
+    ], "Compression keeps the resolution, frame rate and all audio tracks; the date stays the same, so clips don't move around in your library.")}
+    ${group("", [row("Compressed clips", count ? `${count} clip${count === 1 ? "" : "s"}, ${fmtSize(saved)} smaller` : "None yet.", `<button type="button" class="btn" id="set-comp-open">See and undo</button>`)])}`;
+}
 
 async function checkForUpdate(quiet) {
   if (upd.checking || upd.installing) return;
@@ -2748,6 +3257,7 @@ function onDraftChange(path, value) {
   setPath(setUI.draft, path, value);
   if (path === "capture.handcam.device" || path === "capture.handcam.enabled") { hcState.imgDevice = null; hcState.imgError = null; hcState.img = null; }
   if (path === "theme_mode" || path === "theme") applyTheme(setUI.draft.theme_mode, setUI.draft.theme);
+  if (path === "reduce_motion") document.body.classList.toggle("reduce-motion", !!value);
   if (REBUILD.test(path) || path === "theme") rerenderSettings();
   else {
     updateSaveBar();
@@ -2757,7 +3267,7 @@ function onDraftChange(path, value) {
 }
 
 function wireSettings() {
-  main.querySelectorAll(".set-tab").forEach((b) => (b.onclick = () => { setUI.tab = b.dataset.tab; renderSettings(); main.scrollTop = 0; }));
+  main.querySelectorAll(".set-tab").forEach((b) => (b.onclick = () => { setUI.tab = b.dataset.tab; renderSettings(); main.scrollTop = 0; animatePage($("#set-pane")); $("#set-pane").classList.add("enter"); }));
   main.querySelectorAll("[data-bind]").forEach((el) => {
     const path = el.dataset.bind;
     const read = () => (el.type === "checkbox" ? el.checked : el.dataset.num ? Number(el.value) : el.value);
@@ -2802,6 +3312,7 @@ function wireSettings() {
   wireFfmpegButtons(main);
   if (setUI.tab === "handcam") wireHandcam();
   if (setUI.tab === "storage") wireFolders();
+  if ($("#set-comp-open")) $("#set-comp-open").onclick = () => go({ name: "compressed" });
   if ($("#upd-check")) $("#upd-check").onclick = () => checkForUpdate(false);
   if ($("#upd-install")) $("#upd-install").onclick = installUpdate;
   $("#set-save").onclick = saveSettingsDraft;
@@ -2926,12 +3437,13 @@ listen("recording", (e) => {
 let lastSavedClip = null;
 listen("clip-saved", (e) => {
   lastSavedClip = e.payload.path;
+  if (e.payload.kill_times) setTimeout(() => setInfo(e.payload.path, { kills: e.payload.kills, kill_times: e.payload.kill_times, auto: e.payload.auto }), 1500);
   const k = e.payload.kills;
   toast(k ? `Auto clipped ${k === 5 ? "an ace" : "a " + multiText(k)} · ${fmtSize(e.payload.size || 0)}` : `Clip saved · ${fmtSize(e.payload.size || 0)}`);
 });
 // The hand cam was added to a clip saved a moment ago: show the new version.
 listen("clip-updated", (e) => {
-  const { path, size } = e.payload;
+  const { path, size, quiet } = e.payload;
   findClips(path).forEach((c) => { c.size = size; c.modified_ms = Date.now(); });
   state.thumbs.delete(path);
   const cur = state.player && state.player.list[state.player.index];
@@ -2940,12 +3452,18 @@ listen("clip-updated", (e) => {
     const playing = !video.paused;
     loadClipVideo(cur, t, playing);
   }
-  if (state.view.name !== "settings") rerenderKeepScroll();
-  toast("Hand cam added");
+  if (state.view.name !== "settings" && state.view.name !== "compressed") rerenderKeepScroll();
+  if (!quiet) toast("Hand cam added");
 });
 // Read from the saved file a few seconds after a VALORANT clip is saved.
 listen("clip-info", (e) => {
-  const { path, info } = e.payload;
+  const { path, info, quiet } = e.payload;
+  // Read in the background while you were away: just keep the data.
+  if (quiet) {
+    findClips(path).forEach((c) => { if (info.kills != null) c.kills = info.kills; if (info.kill_times) c.kill_times = info.kill_times; });
+    if (curClip() && curClip().path === path) { renderPlayerHeader(); renderKillMarks(); }
+    return;
+  }
   setInfo(path, info);
   const bits = [info.map, info.agent, info.kills != null ? killText(info.kills) : null].filter(Boolean);
   if (bits.length) toast(bits.join(" · "));
@@ -3019,6 +3537,8 @@ function renderWizard() {
       <div style="margin-top:12px">${themeCards(d.theme, "data-wtheme")}</div>
       ${state.status && !state.status.ffmpeg_capture ? `<div class="list" style="margin-top:16px">${ffmpegFixRow()}</div>` : ""}`;
     wireFfmpegButtons(body);
+    // Setup needs ffmpeg: start getting it right away, in the background.
+    if (state.status && !state.status.ffmpeg_capture && !ffi.phase) startFfmpegInstall();
   } else if (step === "keys") {
     body.innerHTML = `
       <h2 id="wiz-title">Pick your hotkeys</h2>
@@ -3132,6 +3652,7 @@ $("#wiz-next").onclick = async () => {
     pollCapture();
     if (rootChanged) { await loadLibrary(); renderSidebar(); render(); }
     if (state.view.name === "settings") { setUI.draft = null; rerenderSettings(); }
+    if (ffi.phase === "done") restartForFfmpeg();
   }
 };
 
@@ -3225,6 +3746,11 @@ async function openOverlay(payload) {
   setPhase(instant ? "settled" : "open");
   if (!instant) setTimeout(() => { if (gen === ov.gen && ov.phase === "open") setPhase("settled"); }, 700);
   resumeSession();
+  // The quick view is for your clips: it never opens on Settings (unless there
+  // are unsaved changes there).
+  if (!app && state.view.name === "settings" && !settingsDirty()) go({ name: "home" });
+  // Opened from the tray on a page ("View clips", "Settings").
+  if (payload.view && state.view.name !== payload.view) go({ name: payload.view });
 }
 
 // Fades the quick view out and hides it. The app window doesn't close this way.
@@ -3426,6 +3952,9 @@ listen("app-hidden", () => {
   pollCapture();
   if (state.config && !state.config.setup_done) openWizard();
   try { APP_VERSION = await invoke("app_version"); } catch {}
+  maybeShowWhatsNew();
+  loadCompress().then(compressNotice);
+  updateBackBtn();
   // Look for a new version a little after start (installing always waits for you).
   if (state.config && state.config.auto_update !== false) setTimeout(() => checkForUpdate(true), 20000);
   runAutotest();

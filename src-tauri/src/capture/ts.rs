@@ -209,8 +209,22 @@ impl Ring {
         }
     }
 
+    /// QPC time (100 ns) the newest buffered frame was captured at.
+    pub fn newest_hns(&self) -> Option<i64> {
+        let offset = self.offset_hns?;
+        self.open.as_ref().or(self.chunks.back())?;
+        Some(pts_to_hns(self.newest_pts()) + offset + self.frame_hns)
+    }
+
     /// The last `secs` seconds (starting at a keyframe), or None if nothing is buffered.
     pub fn snapshot(&self, secs: f64) -> Option<Snapshot> {
+        self.snapshot_since(secs, None)
+    }
+
+    /// Like `snapshot`, but never starting before `not_before_hns` (QPC): the
+    /// keyframe at or just before it, so nothing already clipped is repeated
+    /// beyond that one keyframe interval.
+    pub fn snapshot_since(&self, secs: f64, not_before_hns: Option<i64>) -> Option<Snapshot> {
         let header = [self.pat.as_ref()?.as_slice(), self.pmt.as_ref()?.as_slice()].concat();
         let mut all: Vec<&Chunk> = self.chunks.iter().collect();
         let open_copy;
@@ -221,7 +235,10 @@ impl Ring {
             }
         }
         let last = *all.last()?;
-        let want_start = last.last_pts - (secs * PTS_HZ as f64) as i64;
+        let mut want_start = last.last_pts - (secs * PTS_HZ as f64) as i64;
+        if let (Some(floor), Some(offset)) = (not_before_hns, self.offset_hns) {
+            want_start = want_start.max((floor - offset) * PTS_HZ / 10_000_000);
+        }
         // Latest keyframe at or before the wanted start; else the oldest we have.
         let first = all.iter().rposition(|c| c.pts <= want_start).unwrap_or(0);
         let picked = &all[first..];
@@ -428,6 +445,24 @@ pub mod tests {
         let all = r.snapshot_range(at(-50.0), at(500.0)).unwrap();
         assert_eq!(all.start_pts, 0);
         assert_eq!(all.end_pts, 29 * 90_000 + 59 * 1500);
+    }
+
+    #[test]
+    fn clips_dont_repeat_and_know_the_newest_frame() {
+        let mut r = Ring::new(166_667);
+        r.feed(&stream(60, 0), 10_000_000);
+        let off = r.offset_hns().unwrap();
+        let at = |secs: f64| off + (secs * 1e7) as i64;
+        // newest frame ends at 59.983 + one frame
+        assert_eq!(r.newest_hns(), Some(at(59.0) + pts_to_hns(59 * 1500) + 166_667));
+        // A 60 s clip, but the last one ended at 50.4 s: starts at the keyframe at 50 s.
+        let snap = r.snapshot_since(60.0, Some(at(50.4))).unwrap();
+        assert_eq!(snap.start_pts, 50 * 90_000);
+        // No previous clip: the whole minute.
+        assert_eq!(r.snapshot_since(60.0, None).unwrap().start_pts, 0);
+        // A floor older than the window changes nothing.
+        assert_eq!(r.snapshot_since(10.0, Some(at(5.0))).unwrap().start_pts, 49 * 90_000);
+        assert_eq!(Ring::new(1).newest_hns(), None);
     }
 
     #[test]

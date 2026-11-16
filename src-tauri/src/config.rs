@@ -17,6 +17,8 @@ pub struct Config {
     pub export_dir: String,
     /// The first-run setup (hotkeys, audio, capture) has been completed.
     pub setup_done: bool,
+    /// The last version whose "What's new" card was shown.
+    pub seen_version: String,
     /// "both" (Alt+Z = quick view, tray = app), "quick" or "app".
     pub window_mode: String,
     /// Quick view entrance: "blur", "dim" or "none".
@@ -29,7 +31,39 @@ pub struct Config {
     pub theme: String,
     /// Look for a new version at start (installing always waits for you).
     pub auto_update: bool,
+    /// Fewer animations inside the app (Windows' "Animation effects" off counts too).
+    pub reduce_motion: bool,
     pub capture: Capture,
+    /// Work done while the PC is idle: kill marks for older clips, compression.
+    pub background: Background,
+}
+
+/// Work Clipit does only while you're away from the PC and no game is running.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Background {
+    /// Read the kill times of older VALORANT clips (for the timeline marks).
+    pub index_kills: bool,
+    /// Make VALORANT clips without kills smaller.
+    pub compress: bool,
+    /// "light" (60% of the size), "balanced" (40%) or "small" (25%).
+    pub quality: String,
+    /// Only clips at least this old (hours).
+    pub min_age_hours: u32,
+    /// Keep the originals this many days so compression can be undone (0 = don't keep).
+    pub keep_days: u32,
+    /// Never compress favorites.
+    pub skip_favorites: bool,
+    /// Wait until there's been no mouse or keyboard input for this long (minutes; 0 = any time no game runs).
+    pub away_minutes: u32,
+    /// A Windows notification when clips were compressed.
+    pub notify: bool,
+}
+
+impl Default for Background {
+    fn default() -> Self {
+        Self { index_kills: true, compress: true, quality: "balanced".into(), min_age_hours: 24, keep_days: 7, skip_favorites: true, away_minutes: 5, notify: true }
+    }
 }
 
 /// `Videos\Clipit` in the user's profile (the setup lets people pick another).
@@ -48,13 +82,16 @@ impl Default for Config {
             hotkey: "Alt+Z".into(),
             export_dir: String::new(),
             setup_done: false,
+            seen_version: String::new(),
             window_mode: "both".into(),
             animation: "blur".into(),
             blur_strength: 60,
             theme_mode: "dark".into(),
             theme: "tally".into(),
             auto_update: true,
+            reduce_motion: false,
             capture: Capture::default(),
+            background: Background::default(),
         }
     }
 }
@@ -66,6 +103,8 @@ pub struct Capture {
     /// Keep an instant-replay buffer running.
     pub enabled: bool,
     pub replay_secs: u32,
+    /// A clip starts where the previous clip-key clip ended (never repeats footage).
+    pub no_repeat: bool,
     /// "native", "1440", "1080" or "720" (height; never upscales).
     pub resolution: String,
     pub fps: u32,
@@ -199,6 +238,7 @@ impl Default for Capture {
         Self {
             enabled: true,
             replay_secs: 60,
+            no_repeat: true,
             resolution: "1080".into(),
             fps: 60,
             quality: "high".into(),

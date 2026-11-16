@@ -1,6 +1,6 @@
 [package]
 name = "clipit"
-version = "0.12.3"
+version = "0.13.0"
 description = "A lightweight game clipper and clip library"
 authors = ["MoathByte"]
 license = "MIT"
@@ -16,6 +16,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -32,6 +33,7 @@ windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input",
     "Win32_System_Threading", "Win32_System_Performance", "Win32_System_SystemInformation", "Win32_System_Pipes",
     "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_Storage_FileSystem", "Win32_Security", "Win32_Media_Audio",
+    "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus",
 ] }
 # WASAPI desktop + microphone capture (same windows-rs version as above).
 wasapi = "0.27"

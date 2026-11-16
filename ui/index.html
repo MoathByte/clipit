@@ -23,6 +23,9 @@
         <circle class="dot" cx="12" cy="12" r="3.6"/>
       </svg>
       <span>Clipit</span>
+      <button class="nav-back" id="nav-back" title="Back (Alt+Left)" disabled aria-label="Back">
+        <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
     </div>
 
     <nav class="nav">
@@ -48,7 +51,9 @@
       </button>
     </nav>
 
-    <div class="nav-label">Games</div>
+    <div class="nav-label nav-label-row"><span>Folders</span>
+      <button class="nav-add" id="folder-new" title="New folder" aria-label="New folder"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    </div>
     <div class="games-list" id="games-list"></div>
 
     <div class="sidebar-bottom">
@@ -277,6 +282,17 @@
   </div>
 
   <!-- Confirm dialog -->
+  <div class="modal hidden" id="whats-new">
+    <div class="modal-card whats-new">
+      <div class="wn-kicker" id="wn-version"></div>
+      <h3>What's new</h3>
+      <ul id="wn-list"></ul>
+      <div class="modal-actions">
+        <button class="btn primary" id="wn-ok">Got it</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal hidden" id="confirm">
     <div class="modal-card">
       <h3 id="confirm-title"></h3>
@@ -301,6 +317,37 @@
   </div>
 
   <div class="toasts" id="toasts"></div>
+
+  <div class="sel-bar" id="sel-bar" aria-live="polite">
+    <span class="sel-count" id="sel-count"></span>
+    <button class="btn sm ghost" data-sel="all">Select all</button>
+    <span class="sel-sep"></span>
+    <button class="btn sm" data-sel="fav"><svg viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z"/></svg> <span id="sel-fav-label">Favorite</span></button>
+    <button class="btn sm" data-sel="move"><svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></svg> Move to…</button>
+    <button class="btn sm" data-sel="copy"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg> Copy</button>
+    <button class="btn sm" data-sel="compress"><svg viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg> Compress</button>
+    <button class="btn sm danger" data-sel="delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Delete</button>
+    <button class="icon-btn" data-sel="clear" title="Clear selection (Esc)"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="menu hidden" id="move-menu" role="menu"></div>
+
+  <div class="notice hidden" id="compress-notice" role="status">
+    <div class="notice-icon"><svg viewBox="0 0 24 24"><path d="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7"/></svg></div>
+    <div class="notice-text"><b id="cn-title"></b><span id="cn-sub"></span></div>
+    <button class="btn sm primary" id="cn-see">See clips</button>
+    <button class="icon-btn" id="cn-close" title="Dismiss"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+
+  <div class="modal hidden" id="prompt">
+    <div class="modal-card">
+      <h3 id="prompt-title"></h3>
+      <p id="prompt-text"></p>
+      <input class="input" id="prompt-input" type="text" spellcheck="false" maxlength="80">
+      <div class="modal-actions">
+        <button class="btn ghost" id="prompt-no">Cancel</button>
+        <button class="btn primary" id="prompt-yes">Create</button>
+      </div>
+    </div>
   </div>
 
   <script src="app.js"></script>

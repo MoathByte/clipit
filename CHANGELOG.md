@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.13.0
+
+### New
+- **Folders.** Press **+** next to Folders in the sidebar to make your own ("Funny moments", "Clutches"...). They're
+  real folders in your clips folder. Rename or delete (when empty) from the folder's page or Settings > Storage.
+- **Select several clips.** Tick a clip's corner, or Ctrl/Shift+click, then Favorite, Move to..., Copy (paste into
+  Discord), Compress or Delete them all at once. Ctrl+A selects the page, Esc clears.
+- **Space saver.** VALORANT clips with no kills are made smaller (light / balanced / small) while you're away from the
+  PC and no game runs; it stops the moment you come back. A notice (and a Windows notification) says how much was
+  cleared, and the Compressed clips page lets you undo any of them while the originals are kept (7 days by default).
+  Favorites and edited clips are left alone. All of it is configurable in Settings > Space saver.
+- **Back button** (top left), plus the mouse's back button and Alt+Left.
+- **Tray menu**: Save clip, Start/Stop recording, View clips, Open clips folder, Settings, and Clipit's CPU and RAM.
+- **No repeated footage**: clip twice in a row and the second clip starts where the first ended (at least 5 s).
+  Settings > Recording.
+- **What's new** card after an update.
+- **ffmpeg installs by itself** in first-time setup, with progress, and Clipit restarts on its own when it's ready.
+
+### Faster
+- **Kill marks appear instantly on new clips.** Kills are noted (just the time, no video) the moment they happen while
+  you play; a saved clip takes the ones inside it and the rest are forgotten. The clip's killfeed no longer has to be
+  read after saving. Older clips get their marks while the PC is idle, and opening one reads it right away.
+- **Clips end where you pressed.** On PCs that record a bit behind the game, Clipit waits (up to 3 s) for that moment,
+  so you never press twice. If your PC keeps falling behind, it tells you once.
+
+### Fixed
+- Alt+Z with the app window open (behind another window or minimized) turned it into the quick view showing Settings.
+  It now brings the window forward, and the quick view always opens on your clips.
+
+### Feels better
+- Small animations on buttons, cards, pages and settings, and dialogs open over a blurred background.
+  Settings > Appearance > Reduce motion turns them off (Windows' own setting does too).
+
 ## 0.12.3
 
 - **Hand cam back to how 0.12.0 worked** (the camera is added to saved clips, not drawn live), which fixes the
