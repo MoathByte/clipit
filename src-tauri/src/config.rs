@@ -152,6 +152,18 @@ pub struct HandCam {
     pub zoom: f64,
     /// Shifts the camera in time to match the game (ms; positive = later).
     pub delay_ms: i32,
+    /// Picture adjustments Clipit applies (work with any camera).
+    /// -100..100, 0 = unchanged.
+    pub brightness: i32,
+    /// Percent, 100 = unchanged.
+    pub contrast: u32,
+    pub saturation: u32,
+    /// Percent; above 100 lifts dark parts without blowing out bright ones.
+    pub gamma: u32,
+    /// Kelvin, 6500 = unchanged; lower is warmer.
+    pub temperature: u32,
+    /// 0 = off .. 100.
+    pub sharpness: u32,
 }
 
 impl Default for HandCam {
@@ -172,6 +184,12 @@ impl Default for HandCam {
             rotate: 0,
             zoom: 1.0,
             delay_ms: 0,
+            brightness: 0,
+            contrast: 100,
+            saturation: 100,
+            gamma: 100,
+            temperature: 6500,
+            sharpness: 0,
         }
     }
 }

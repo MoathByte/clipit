@@ -162,6 +162,10 @@ struct Shared {
     cam_ring: Mutex<ts::Ring>,
     /// Last hand cam failure (shown in Settings) and when to try again.
     cam_error: Mutex<(String, Instant)>,
+    /// The camera is lent to its settings window: don't record it meanwhile.
+    cam_hold: AtomicBool,
+    /// Last preview picture (device, JPEG), so adjustments preview instantly.
+    preview: Mutex<Option<(String, Vec<u8>)>>,
     status: Mutex<Status>,
     job: Job,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -193,6 +197,8 @@ impl Engine {
             cam: Mutex::new(None),
             cam_ring: Mutex::new(ts::Ring::new(333_333)),
             cam_error: Mutex::new((String::new(), Instant::now())),
+            cam_hold: AtomicBool::new(false),
+            preview: Mutex::new(None),
             status: Mutex::new(Status::default()),
             job: Job::new(),
             events,
@@ -240,7 +246,7 @@ impl Engine {
     /// Starts, restarts or stops the camera: on only while the game is captured.
     fn sync_cam(&self, ffmpeg: &Path, cfg: &Capture) {
         let hc = &cfg.handcam;
-        let want = hc.enabled && !hc.device.trim().is_empty() && self.s.run.lock().unwrap().is_some();
+        let want = hc.enabled && !hc.device.trim().is_empty() && self.s.run.lock().unwrap().is_some() && !self.s.cam_hold.load(Ordering::SeqCst);
         let key = handcam::key(hc);
         let mut cam = self.s.cam.lock().unwrap();
         // Died (unplugged, used by another app)?
@@ -348,6 +354,36 @@ impl Engine {
             }
         }
         handcam::grab_frame(&ffmpeg, device)
+    }
+
+    /// Preview picture with the adjustments in `hc` applied. `fresh` takes a new
+    /// picture from the camera; otherwise the last one is reused (instant).
+    pub fn camera_preview(&self, hc: &crate::config::HandCam, fresh: bool) -> Result<Vec<u8>, String> {
+        let ffmpeg = self.s.ffmpeg.clone().or_else(|| crate::media::find_ffmpeg().map(|f| f.path)).ok_or("ffmpeg isn't installed")?;
+        let cached = self.s.preview.lock().unwrap().clone().filter(|(d, _)| !fresh && *d == hc.device);
+        let raw = match cached {
+            Some((_, jpeg)) => jpeg,
+            None => {
+                let jpeg = self.camera_frame(&hc.device)?;
+                *self.s.preview.lock().unwrap() = Some((hc.device.clone(), jpeg.clone()));
+                jpeg
+            }
+        };
+        handcam::adjust_jpeg(&ffmpeg, &raw, hc)
+    }
+
+    /// Opens the camera's own settings window. The camera is released while it's
+    /// open (a camera can only be used by one program at a time).
+    pub fn camera_settings(&self, device: &str) -> Result<(), String> {
+        let ffmpeg = self.s.ffmpeg.clone().or_else(|| crate::media::find_ffmpeg().map(|f| f.path)).ok_or("ffmpeg isn't installed")?;
+        self.s.cam_hold.store(true, Ordering::SeqCst);
+        if let Some(c) = self.s.cam.lock().unwrap().take() {
+            stop_cam(c);
+        }
+        let res = handcam::settings_dialog(&ffmpeg, device);
+        self.s.cam_hold.store(false, Ordering::SeqCst);
+        *self.s.preview.lock().unwrap() = None; // the picture changed
+        res
     }
 
     pub fn cameras(&self) -> Vec<String> {
@@ -1388,7 +1424,7 @@ mod tests {
         cfg.mic = false;
         cfg.sounds = false;
         cfg.auto_clip_kills = false;
-        cfg.handcam = crate::config::HandCam { enabled: true, device, shape: "circle".into(), border: "white".into(), ..Default::default() };
+        cfg.handcam = crate::config::HandCam { enabled: true, device, shape: "circle".into(), border: "white".into(), gamma: 130, temperature: 4500, sharpness: 40, brightness: 10, ..Default::default() };
         let (tx, rx) = std::sync::mpsc::channel::<String>();
         let tx = Mutex::new(tx);
         let ffmpeg = crate::media::find_ffmpeg().map(|f| f.path);

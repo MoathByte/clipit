@@ -926,12 +926,20 @@ async fn list_cameras(state: State<'_, AppState>) -> Result<Vec<String>, String>
     tauri::async_runtime::spawn_blocking(move || engine.cameras()).await.map_err(|e| e.to_string())
 }
 
-/// A still from a camera for the hand cam preview, as a data: URL.
+/// A still from the hand cam with its picture adjustments, as a data: URL.
+/// `fresh` = take a new picture (else the last one is adjusted again).
 #[tauri::command]
-async fn camera_preview(state: State<'_, AppState>, device: String) -> Result<String, String> {
+async fn camera_preview(state: State<'_, AppState>, handcam: config::HandCam, fresh: bool) -> Result<String, String> {
     let engine = state.engine.clone();
-    let jpeg = tauri::async_runtime::spawn_blocking(move || engine.camera_frame(&device)).await.map_err(|e| e.to_string())??;
+    let jpeg = tauri::async_runtime::spawn_blocking(move || engine.camera_preview(&handcam, fresh)).await.map_err(|e| e.to_string())??;
     Ok(format!("data:image/jpeg;base64,{}", capture::handcam::base64(&jpeg)))
+}
+
+/// The camera's own settings window (exposure, white balance, focus…).
+#[tauri::command]
+async fn camera_settings(state: State<'_, AppState>, device: String) -> Result<(), String> {
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.camera_settings(&device)).await.map_err(|e| e.to_string())?
 }
 
 /// Reads when your kills happen in a clip, to mark them on the timeline.
@@ -1454,6 +1462,7 @@ fn main() {
             read_kill_times,
             list_cameras,
             camera_preview,
+            camera_settings,
             open_app_window,
             set_window_theme,
             app_version,

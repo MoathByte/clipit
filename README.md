@@ -24,7 +24,9 @@
 - **Recording**: start and stop with another hotkey. Crash-safe: an interrupted recording is recovered on the next start.
 - **Game window only** (nothing runs until a game is in focus, and pop-ups never end up in your clips) or **whole monitor**.
 - **Hand cam** (optional): a webcam or phone camera added onto your saved clips. Drag it into place on a preview and
-  pick size, shape (rectangle, rounded, circle), crop, border, mirror, rotation, zoom and a timing offset. The camera
+  pick size, shape (rectangle, rounded, circle), crop, border, mirror, rotation, zoom and a timing offset. Brightness,
+  contrast, saturation, gamma, colour temperature and sharpness work with any camera; the camera's own settings window
+  (exposure, white balance, focus) opens from Clipit too. The camera
   is recorded into its own small RAM buffer and only runs while a game is captured; the game recording itself is
   never changed until a clip is saved.
 - Desktop audio and microphone, each on any device, with volume, mic noise suppression and optional separate tracks.

@@ -2387,6 +2387,7 @@ function handcamPane(d) {
   return `<h2>Hand cam</h2><p class="lede">Show your hands or face in your clips.</p>${intro}
     ${group("Camera", [
       row("Camera", "Phone apps like Iriun Webcam show up here too.", camControl),
+      h.device ? row("Camera settings", "Exposure, white balance, focus… from the camera itself, like Configure Video in OBS.", `<button type="button" class="btn" id="hc-dialog">Open</button>`) : "",
       row("Quality", "", segB("capture.handcam.height", [[480, "480p"], [720, "720p"], [1080, "1080p"]], true)),
       row("Frame rate", "", segB("capture.handcam.fps", [[30, "30 fps"], [60, "60 fps"]], true)),
     ], { text: hcStatusText(h), id: "hc-status" })}
@@ -2400,6 +2401,7 @@ function handcamPane(d) {
       </div>
       <div class="hc-under">
         <div class="seg" id="hc-corners">${corners.map(([v, l]) => `<button type="button" data-corner="${v}">${l}</button>`).join("")}</div>
+        <button type="button" class="btn ghost" id="hc-refresh"${h.device ? "" : " disabled"}>New picture</button>
         <div class="hc-size"><span>Size</span><input type="range" class="range" id="hc-size" min="8" max="60" step="1" value="${Math.round(h.size * 100)}"><span class="range-val" id="hc-size-val">${Math.round(h.size * 100)}%</span></div>
       </div>
       <div class="group-foot">Drag the camera to move it, or its corner to resize. Mind the killfeed (top right), minimap (top left) and abilities (bottom middle).</div>
@@ -2415,6 +2417,7 @@ function handcamPane(d) {
       row("Rotate", "For a phone held sideways.", segB("capture.handcam.rotate", [[0, "0°"], [90, "90°"], [180, "180°"], [270, "270°"]], true)),
       row("Zoom", "Zooms into the middle of the picture.", `<input type="range" class="range" id="hc-zoom" min="100" max="300" step="5" value="${Math.round((h.zoom || 1) * 100)}"><span class="range-val" id="hc-zoom-val">${Math.round((h.zoom || 1) * 100)}%</span>`),
     ])}
+    ${group("Adjustments", hcAdjustRows(h), "Applied by Clipit, so they work with any camera. The preview shows the result.")}
     ${group("Timing", [
       row("Camera delay", "Phone cameras arrive a little late. If your hands move after the game does, move this left.", `<input type="range" class="range" id="hc-delay" min="-1000" max="1000" step="20" value="${h.delay_ms}"><span class="range-val" id="hc-delay-val">${h.delay_ms > 0 ? "+" : ""}${h.delay_ms} ms</span>`),
     ], "Clips with a hand cam take a few seconds longer to save, because the video is encoded again with the camera on it. Kills, map and agent are still read from the game alone.")}`;
@@ -2430,14 +2433,14 @@ async function hcLoadCams(force) {
   else if (setUI.tab === "handcam") rerenderSettings();
 }
 
-async function hcLoadPicture() {
+async function hcLoadPicture(fresh = true) {
   const h = setUI.draft && setUI.draft.capture.handcam;
   if (!h || !h.enabled || !h.device || hcState.loadingImg) return;
   hcState.loadingImg = true;
   hcState.imgError = null;
   const device = h.device;
   try {
-    hcState.img = await invoke("camera_preview", { device });
+    hcState.img = await invoke("camera_preview", { handcam: h, fresh });
     hcState.imgDevice = device;
   } catch (e) {
     hcState.img = null;
@@ -2445,6 +2448,45 @@ async function hcLoadPicture() {
   }
   hcState.loadingImg = false;
   if (state.view.name === "settings" && setUI.tab === "handcam") rerenderSettings();
+}
+
+// Sliders: re-adjust the last picture (fast) and swap it in without rebuilding.
+let hcAdjustTimer = 0;
+let hcAdjustBusy = false;
+let hcAdjustAgain = false;
+function hcAdjustPreview() {
+  clearTimeout(hcAdjustTimer);
+  hcAdjustTimer = setTimeout(async () => {
+    const h = setUI.draft && setUI.draft.capture.handcam;
+    if (!h || !h.device || !hcState.img) return;
+    if (hcAdjustBusy) { hcAdjustAgain = true; return; }
+    hcAdjustBusy = true;
+    try {
+      hcState.img = await invoke("camera_preview", { handcam: h, fresh: false });
+      const img = $("#hc-pic img");
+      if (img) img.src = hcState.img;
+    } catch {}
+    hcAdjustBusy = false;
+    if (hcAdjustAgain) { hcAdjustAgain = false; hcAdjustPreview(); }
+  }, 120);
+}
+
+const HC_ADJ = [
+  ["brightness", "Brightness", -100, 100, 5, 0, (v) => (v > 0 ? "+" : "") + v],
+  ["contrast", "Contrast", 25, 200, 5, 100, (v) => v + "%"],
+  ["saturation", "Saturation", 0, 200, 5, 100, (v) => v + "%"],
+  ["gamma", "Gamma", 50, 200, 5, 100, (v) => v + "%"],
+  ["temperature", "Colour temperature", 3000, 9000, 100, 6500, (v) => (v === 6500 ? "Neutral" : v < 6500 ? `Warmer · ${v} K` : `Cooler · ${v} K`)],
+  ["sharpness", "Sharpness", 0, 100, 5, 0, (v) => (v ? v + "%" : "Off")],
+];
+const HC_ADJ_SUB = {
+  gamma: "Brightens dark rooms without blowing out bright parts.",
+  temperature: "Fixes orange or blue light.",
+};
+
+function hcAdjustRows(h) {
+  return HC_ADJ.map(([k, label, min, max, step, def, fmt]) =>
+    row(label, HC_ADJ_SUB[k] || "", `<input type="range" class="range" data-hc-adj="${k}" min="${min}" max="${max}" step="${step}" value="${h[k]}"><span class="range-val wide" id="hc-adj-${k}">${fmt(h[k])}</span><button type="button" class="icon-btn${h[k] === def ? " invisible" : ""}" data-hc-reset="${k}" title="Reset"><svg viewBox="0 0 24 24"><path d="M4 11a8 8 0 1 1 2.3 5.7M4 5v6h6"/></svg></button>`));
 }
 
 // A frame from your newest clip behind the camera box.
@@ -2465,6 +2507,42 @@ function wireHandcam() {
   hcLoadCams(false);
   hcLoadStage();
   if (h.device && hcState.imgDevice !== h.device && !hcState.loadingImg && !hcState.imgError) hcLoadPicture();
+  const dlg = $("#hc-dialog");
+  if (dlg) dlg.onclick = async () => {
+    dlg.disabled = true;
+    dlg.textContent = "Open in another window";
+    try {
+      await invoke("camera_settings", { device: h.device });
+      hcState.imgDevice = null;
+      hcLoadPicture(true);
+    } catch (e) { toast(String(e), true); }
+    dlg.disabled = false;
+    dlg.textContent = "Open";
+  };
+  const fresh = $("#hc-refresh");
+  if (fresh) fresh.onclick = () => { hcState.imgError = null; hcLoadPicture(true); };
+  main.querySelectorAll("[data-hc-adj]").forEach((r) => {
+    const k = r.dataset.hcAdj;
+    const spec = HC_ADJ.find((a) => a[0] === k);
+    const show = () => r.style.setProperty("--v", (r.value - r.min) / (r.max - r.min) * 100 + "%");
+    show();
+    r.addEventListener("input", () => {
+      const v = Number(r.value);
+      setPath(setUI.draft, "capture.handcam." + k, v);
+      $("#hc-adj-" + k).textContent = spec[6](v);
+      main.querySelector(`[data-hc-reset="${k}"]`).classList.toggle("invisible", v === spec[5]);
+      show();
+      updateSaveBar();
+      hcAdjustPreview();
+    });
+  });
+  main.querySelectorAll("[data-hc-reset]").forEach((b) => (b.onclick = () => {
+    const k = b.dataset.hcReset;
+    const spec = HC_ADJ.find((a) => a[0] === k);
+    const r = main.querySelector(`[data-hc-adj="${k}"]`);
+    r.value = spec[5];
+    r.dispatchEvent(new Event("input"));
+  }));
   const rescan = $("#hc-rescan");
   if (rescan) rescan.onclick = () => { hcState.imgError = null; hcState.imgDevice = null; hcLoadCams(true).then(hcLoadPicture); };
   const stage = $("#hc-stage");

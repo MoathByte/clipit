@@ -116,7 +116,83 @@ pub fn camera_filter(h: &HandCam, cw: u32, ch: u32) -> String {
     let a = cw as f64 / ch as f64;
     f.push(format!("crop='min(iw,ih*{a:.5})':'min(ih,iw/{a:.5})'"));
     f.push(format!("scale={cw}:{ch}"));
+    if let Some(adj) = adjust_filter(h) {
+        f.push(adj);
+    }
     f.join(",")
+}
+
+/// Brightness, contrast, colour… as ffmpeg filters, or None when nothing changes.
+pub fn adjust_filter(h: &HandCam) -> Option<String> {
+    let mut f: Vec<String> = Vec::new();
+    let b = h.brightness.clamp(-100, 100) as f64 * 0.003;
+    let c = h.contrast.clamp(25, 300) as f64 / 100.0;
+    let s = h.saturation.min(300) as f64 / 100.0;
+    let g = h.gamma.clamp(25, 400) as f64 / 100.0;
+    if b != 0.0 || c != 1.0 || s != 1.0 || g != 1.0 {
+        f.push(format!("eq=brightness={b:.3}:contrast={c:.2}:saturation={s:.2}:gamma={g:.2}"));
+    }
+    let k = h.temperature.clamp(1000, 40000);
+    if k != 6500 {
+        f.push(format!("colortemperature=temperature={k}:pl=1"));
+    }
+    if h.sharpness > 0 {
+        f.push(format!("unsharp=5:5:{:.2}", h.sharpness.min(100) as f64 / 100.0 * 1.5));
+    }
+    (!f.is_empty()).then(|| f.join(","))
+}
+
+/// A preview picture with the adjustments applied (JPEG in, JPEG out).
+pub fn adjust_jpeg(ffmpeg: &Path, jpeg: &[u8], h: &HandCam) -> Result<Vec<u8>, String> {
+    let Some(adj) = adjust_filter(h) else { return Ok(jpeg.to_vec()) };
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "mjpeg", "-i", "pipe:0", "-frames:v", "1", "-vf", &adj, "-q:v", "3", "-f", "mjpeg", "pipe:1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().unwrap();
+    let data = jpeg.to_vec();
+    let w = std::thread::spawn(move || {
+        use std::io::Write;
+        let _ = stdin.write_all(&data);
+    });
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let _ = w.join();
+    if out.stdout.is_empty() {
+        return Err(String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("Couldn't adjust the picture").to_string());
+    }
+    Ok(out.stdout)
+}
+
+/// Opens the camera's own settings window (exposure, white balance, focus… —
+/// whatever the camera offers), like OBS's "Configure Video". Returns when it's closed.
+pub fn settings_dialog(ffmpeg: &Path, device: &str) -> Result<(), String> {
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "dshow", "-show_video_device_dialog", "true", "-i"])
+        .arg(format!("video={device}"))
+        .args(["-frames:v", "1", "-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let out = cmd.spawn().and_then(|c| c.wait_with_output()).map_err(|e| e.to_string())?;
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Virtual and phone cameras (Iriun, OBS…) often have no settings window.
+    if err.contains("property pages") {
+        return Err("This camera has no settings window of its own. Phone cameras keep exposure, focus and so on in the app on your phone. The picture adjustments below work with any camera.".into());
+    }
+    if !out.status.success() {
+        return Err(if err.contains("Could not") || err.contains("I/O error") {
+            "The camera isn't connected or is in use by another app.".into()
+        } else {
+            err.lines().last().unwrap_or("Couldn't open the camera's settings").to_string()
+        });
+    }
+    Ok(())
 }
 
 pub fn base64(data: &[u8]) -> String {
@@ -437,6 +513,18 @@ mod tests {
         assert_eq!(base64(b"Man"), "TWFu");
         assert_eq!(base64(b"Ma"), "TWE=");
         assert_eq!(base64(b"M"), "TQ==");
+    }
+
+    #[test]
+    fn adjustments_only_when_changed() {
+        let mut c = cam();
+        assert_eq!(adjust_filter(&c), None);
+        c.gamma = 130;
+        c.temperature = 5000;
+        c.sharpness = 40;
+        let f = adjust_filter(&c).unwrap();
+        assert_eq!(f, "eq=brightness=0.000:contrast=1.00:saturation=1.00:gamma=1.30,colortemperature=temperature=5000:pl=1,unsharp=5:5:0.60");
+        assert!(camera_filter(&c, 480, 270).ends_with(&f));
     }
 
     #[test]
