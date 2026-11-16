@@ -565,6 +565,9 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
             let _ = app.emit("clip-info", serde_json::json!({ "path": path, "info": merged }));
         }
         Event::ClipFailed(e) => capture_error(app, &cfg_now, &format!("Couldn't save the clip: {e}")),
+        Event::Warning(m) => {
+            let _ = app.emit("capture-error", m);
+        }
         Event::RecordingStarted(path) => {
             set_tray_tooltip(app, "Clipit \u{2014} \u{25CF} recording");
             let _ = app.emit("recording", serde_json::json!({ "active": true, "path": path }));
@@ -609,7 +612,7 @@ fn set_tray_tooltip(app: &AppHandle, text: &str) {
 }
 
 /// Watches the clips folder and tells the UI when clips are added/removed.
-fn start_watcher(app: &AppHandle, root: &str) -> Option<RecommendedWatcher> {
+fn start_watcher(app: &AppHandle, folders: &[String]) -> Option<RecommendedWatcher> {
     let handle = app.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if let Ok(ev) = res {
@@ -621,22 +624,21 @@ fn start_watcher(app: &AppHandle, root: &str) -> Option<RecommendedWatcher> {
         }
     })
     .ok()?;
-    watcher
-        .watch(Path::new(root), RecursiveMode::Recursive)
-        .ok()?;
-    Some(watcher)
+    let mut any = false;
+    for f in folders {
+        any |= watcher.watch(Path::new(f), RecursiveMode::Recursive).is_ok();
+    }
+    any.then_some(watcher)
 }
 
 /// Only allow file operations on video files inside the clips folder.
 fn ensure_clip(state: &AppState, path: &str) -> Result<PathBuf, String> {
-    let root = PathBuf::from(&state.config.lock().unwrap().clips_root);
-    let root = root
-        .canonicalize()
-        .map_err(|_| "Clips folder not found".to_string())?;
+    let folders = state.config.lock().unwrap().library_folders();
     let p = PathBuf::from(path)
         .canonicalize()
         .map_err(|_| "Clip not found".to_string())?;
-    if p.starts_with(&root) && scanner::is_video(&p) {
+    let inside = folders.iter().filter_map(|f| PathBuf::from(f).canonicalize().ok()).any(|root| p.starts_with(&root));
+    if inside && scanner::is_video(&p) {
         Ok(PathBuf::from(path))
     } else {
         Err("That file isn't in your clips folder".into())
@@ -762,8 +764,8 @@ fn save_config(app: AppHandle, state: State<AppState>, patch: serde_json::Value)
     config.save(&state.config_path)?;
     *state.config.lock().unwrap() = config.clone();
 
-    if old.clips_root != config.clips_root {
-        *state.watcher.lock().unwrap() = start_watcher(&app, &config.clips_root);
+    if old.library_folders() != config.library_folders() {
+        *state.watcher.lock().unwrap() = start_watcher(&app, &config.library_folders());
     }
     let keys = |c: &Config| (c.hotkey.clone(), c.capture.clip_hotkey.clone(), c.capture.record_hotkey.clone());
     if keys(&old) != keys(&config) {
@@ -775,12 +777,12 @@ fn save_config(app: AppHandle, state: State<AppState>, patch: serde_json::Value)
 
 #[tauri::command]
 async fn scan_library(state: State<'_, AppState>) -> Result<scanner::Library, String> {
-    let root = state.config.lock().unwrap().clips_root.clone();
+    let folders = state.config.lock().unwrap().library_folders();
     let favorites = state.favorites.snapshot();
     let reviewed = state.reviewed.snapshot();
     let meta = state.meta.snapshot();
     tauri::async_runtime::spawn_blocking(move || {
-        scanner::scan(&root, &scanner::Flags { favorites: &favorites, reviewed: &reviewed, meta: &meta })
+        scanner::scan(&folders, &scanner::Flags { favorites: &favorites, reviewed: &reviewed, meta: &meta })
     })
         .await
         .map_err(|e| e.to_string())
@@ -917,6 +919,21 @@ async fn analyze_clip(state: State<'_, AppState>, path: String) -> Result<librar
     state.meta.set(&path, &info)
 }
 
+/// Cameras for the hand cam.
+#[tauri::command]
+async fn list_cameras(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.cameras()).await.map_err(|e| e.to_string())
+}
+
+/// A still from a camera for the hand cam preview, as a data: URL.
+#[tauri::command]
+async fn camera_preview(state: State<'_, AppState>, device: String) -> Result<String, String> {
+    let engine = state.engine.clone();
+    let jpeg = tauri::async_runtime::spawn_blocking(move || engine.camera_frame(&device)).await.map_err(|e| e.to_string())??;
+    Ok(format!("data:image/jpeg;base64,{}", capture::handcam::base64(&jpeg)))
+}
+
 /// Reads when your kills happen in a clip, to mark them on the timeline.
 /// A known kill count (an auto clip's) is kept.
 #[tauri::command]
@@ -1032,8 +1049,8 @@ fn open_app_window(app: AppHandle) {
 #[tauri::command]
 fn restore_clip(state: State<AppState>, path: String) -> Result<(), String> {
     let p = PathBuf::from(&path);
-    let root = PathBuf::from(&state.config.lock().unwrap().clips_root);
-    if !scanner::is_video(&p) || !p.starts_with(&root) {
+    let folders = state.config.lock().unwrap().library_folders();
+    if !scanner::is_video(&p) || !folders.iter().any(|f| p.starts_with(f)) {
         return Err("That file isn't in your clips folder".into());
     }
     let name = p.file_name().ok_or("bad path")?.to_os_string();
@@ -1064,22 +1081,14 @@ fn set_favorite(state: State<AppState>, path: String, favorite: bool) -> Result<
 #[tauri::command]
 fn rename_clip(state: State<AppState>, path: String, name: String) -> Result<scanner::Clip, String> {
     let old = ensure_clip(&state, &path)?;
-    let root = PathBuf::from(&state.config.lock().unwrap().clips_root);
+    let folders = state.config.lock().unwrap().library_folders();
     let new = library::rename(&old, &name)?;
     let new_str = new.to_string_lossy().into_owned();
     if let Err(e) = state.favorites.moved(&path, &new_str) {
         eprintln!("favorites not updated after rename: {e}");
     }
     let _ = state.reviewed.moved(&path, &new_str);
-    let parent = new.parent().unwrap_or(&root);
-    let game = if is_inside(parent, &root) && !is_inside(&root, parent) {
-        parent
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Other".into())
-    } else {
-        "Other".into()
-    };
+    let game = scanner::game_of(&new, &folders);
     state.meta.moved(&path, Some(&new_str));
     let (favorites, reviewed, meta) = (state.favorites.snapshot(), state.reviewed.snapshot(), state.meta.snapshot());
     scanner::clip_from(&new, &game, &scanner::Flags { favorites: &favorites, reviewed: &reviewed, meta: &meta })
@@ -1265,7 +1274,7 @@ fn main() {
             }
 
 
-            let watcher = start_watcher(&handle, &config.clips_root);
+            let watcher = start_watcher(&handle, &config.library_folders());
 
             let http = reqwest::Client::builder()
                 .user_agent(concat!("Clipit/", env!("CARGO_PKG_VERSION")))
@@ -1443,6 +1452,8 @@ fn main() {
             restore_clip,
             analyze_clip,
             read_kill_times,
+            list_cameras,
+            camera_preview,
             open_app_window,
             set_window_theme,
             app_version,

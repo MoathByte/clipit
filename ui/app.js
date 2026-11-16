@@ -425,7 +425,7 @@ function renderHero() {
     <div class="hero-bg" style="${bg ? `background-image:url('${bg}')` : ""}"></div>
     <div class="hero-content">
       ${logo ? `<img class="hero-logo" src="${logo}" alt="${esc(name)}">` : `<h1>${esc(name)}</h1>`}
-      <div class="hero-stats">${g.clip_count} clips · ${fmtSize(g.total_size)} · last clip ${shortFmt.format(new Date(g.latest_ms))}</div>
+      <div class="hero-stats">${g.clip_count ? `${g.clip_count} clip${g.clip_count === 1 ? "" : "s"} · ${fmtSize(g.total_size)} · last clip ${shortFmt.format(new Date(g.latest_ms))}` : "No clips yet"}</div>
     </div>`;
 }
 
@@ -1313,7 +1313,8 @@ function recountGames() {
     g.clip_count++; g.total_size += c.size; g.latest_ms = Math.max(g.latest_ms, c.modified_ms);
     by.set(c.game, g);
   }
-  state.lib.games = state.lib.games.filter((g) => by.has(g.name)).map((g) => by.get(g.name));
+  // Empty game folders stay (every folder is a game).
+  state.lib.games = state.lib.games.map((g) => by.get(g.name) || { ...g, clip_count: 0, total_size: 0, latest_ms: 0 });
 }
 
 $("#p-close").onclick = closePlayer;
@@ -2087,12 +2088,14 @@ const ICON = {
   hotkeys: `<svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg>`,
   appearance: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>`,
   storage: `<svg viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z"/></svg>`,
+  handcam: `<svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="m16 11 5-3v8l-5-3"/></svg>`,
   about: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>`,
 };
 const SET_TABS = [
   ["general", "General", "var(--c4)"],
   ["recording", "Recording", "var(--accent)"],
   ["auto", "Auto clips", "var(--c3)"],
+  ["handcam", "Hand cam", "var(--c2)"],
   ["audio", "Audio", "var(--c2)"],
   ["hotkeys", "Hotkeys", "var(--c3)"],
   ["appearance", "Appearance", "var(--accent)"],
@@ -2293,9 +2296,11 @@ function settingsPane(tab) {
       ${group("Mode", [row("Mode", "", segB("theme_mode", [["dark", "Dark"], ["light", "Light"], ["system", "Match Windows"]]))])}
       <div class="group"><div class="group-title">Theme</div>${themeCards(d.theme, "data-theme-pick")}</div>`;
   }
+  if (tab === "handcam") return handcamPane(d);
   if (tab === "storage") {
     return `<h2>Storage</h2><p class="lede">Where clips live.</p>
-      ${group("Clips folder", [`<div class="row stack">${fieldB("clips_root", "Choose a folder", true)}<div class="row-sub">${st.root_exists ? "Folder found. Each game gets its own sub-folder." : "Folder not found yet. It's created when the first clip is saved."}</div></div>`])}
+      ${group("Clips folder", [`<div class="row stack">${fieldB("clips_root", "Choose a folder", true)}<div class="row-sub">${st.root_exists ? "Folder found. New clips go here, each game in its own folder." : "Folder not found yet. It's created when the first clip is saved."}</div></div>`], "Every folder inside it shows up as a game, even before it has clips. Clips in folders inside those count for that game.")}
+      ${foldersGroup(d)}
       ${group("Exports", [`<div class="row stack">${fieldB("export_dir", "Next to the original clip (recommended)", true)}</div>`], "Edited clips are saved next to the original so they show up in your library. Pick a folder only if you'd rather keep them somewhere else; they won't appear in the library then.")}
       ${group("Game artwork", [`<div class="row stack">${fieldB("steamgriddb_key", "SteamGridDB API key", false, "password")}</div>`, row("Download artwork again", st.has_art_key ? "Uses the saved key." : "Save a key first.", `<button type="button" class="btn" id="set-refresh-art">Refresh</button>`)], "Covers and logos come from SteamGridDB. Make a free account and copy your API key from steamgriddb.com/profile/preferences/api.")}
       ${group("Tools", [
@@ -2326,6 +2331,254 @@ function wireFfmpegButtons(root) {
         await invoke("restart_app");
       }
     } catch (e) { toast(String(e), true); }
+  }));
+}
+
+// ---------- hand cam settings ----------
+
+const hcState = { cams: null, loadingCams: false, img: null, imgDevice: null, imgError: null, loadingImg: false, stage: null };
+const HC_ASPECT = { "16:9": 16 / 9, "4:3": 4 / 3, "1:1": 1, "3:4": 3 / 4, "9:16": 9 / 16 };
+const hcAspect = (h) => (h.shape === "circle" ? 1 : HC_ASPECT[h.aspect] || 16 / 9);
+
+// Box in stage fractions, kept inside the frame (same rules as the saved clip).
+function hcBox(h) {
+  const a = hcAspect(h);
+  let w = Math.min(1, Math.max(0.05, h.size));
+  let hh = (w * 16 / 9) / a;
+  if (hh > 1) { hh = 1; w = a * 9 / 16; }
+  const x = Math.min(Math.max(0, h.x), 1 - w);
+  const y = Math.min(Math.max(0, h.y), 1 - hh);
+  return { x, y, w, h: hh };
+}
+
+function hcStatusText(h) {
+  const cs = state.capStatus || {};
+  if (!h.device) return "Pick a camera to start.";
+  if (cs.handcam_error) return `<span class="bad-text">${esc(cs.handcam_error)}</span>`;
+  if (cs.handcam_on) return "Recording the camera with the game.";
+  return "The camera turns on with the game capture (save first if you just changed it).";
+}
+
+function hcPictureStyle(h) {
+  const t = [];
+  if (h.rotate) t.push(`rotate(${h.rotate}deg)`);
+  if (h.flip_h) t.push("scaleX(-1)");
+  if (h.flip_v) t.push("scaleY(-1)");
+  t.push(`scale(${Math.max(1, h.zoom || 1)})`);
+  const sideways = h.rotate === 90 || h.rotate === 270;
+  return `transform:${t.join(" ")};${sideways ? "width:var(--hc-h);height:var(--hc-w);" : ""}`;
+}
+
+function handcamPane(d) {
+  const h = d.capture.handcam;
+  const intro = group("", [row("Add a hand cam to clips", "Records a camera next to the game and puts it on every clip you save, auto clips too. It's only added to saved clips, and the camera is only on while a game is captured.", toggle("capture.handcam.enabled"))]);
+  if (!h.enabled) return `<h2>Hand cam</h2><p class="lede">Show your hands or face in your clips.</p>${intro}`;
+  const cams = hcState.cams;
+  const list = cams ? [...cams] : [];
+  if (h.device && !list.includes(h.device)) list.unshift(h.device);
+  const camControl = cams === null && !h.device
+    ? `<span class="row-sub">Looking for cameras…</span>`
+    : `${selectB("capture.handcam.device", [["", list.length ? "Choose a camera" : "No camera found"], ...list.map((c) => [c, c])])}<button type="button" class="icon-btn" id="hc-rescan" title="Look for cameras again"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>`;
+  const b = hcBox(h);
+  const pic = hcState.img && hcState.imgDevice === h.device
+    ? `<img src="${hcState.img}" alt="" draggable="false">`
+    : `<span>${h.device ? (hcState.loadingImg ? "Getting a picture…" : esc(hcState.imgError || "No picture yet")) : "Camera"}</span>`;
+  const corners = [["tl", "Top left"], ["tr", "Top right"], ["bl", "Bottom left"], ["br", "Bottom right"]];
+  return `<h2>Hand cam</h2><p class="lede">Show your hands or face in your clips.</p>${intro}
+    ${group("Camera", [
+      row("Camera", "Phone apps like Iriun Webcam show up here too.", camControl),
+      row("Quality", "", segB("capture.handcam.height", [[480, "480p"], [720, "720p"], [1080, "1080p"]], true)),
+      row("Frame rate", "", segB("capture.handcam.fps", [[30, "30 fps"], [60, "60 fps"]], true)),
+    ], { text: hcStatusText(h), id: "hc-status" })}
+    <div class="group">
+      <div class="group-title">Placement</div>
+      <div class="hc-stage" id="hc-stage" style="${hcState.stage ? `background-image:url('${hcState.stage}')` : ""}">
+        <div class="hc-box shape-${esc(h.shape)} border-${esc(h.border)}" id="hc-box" style="left:${b.x * 100}%;top:${b.y * 100}%;width:${b.w * 100}%;height:${b.h * 100}%">
+          <div class="hc-clip"><div class="hc-pic" id="hc-pic" style="${hcPictureStyle(h)}">${pic}</div></div>
+          <div class="hc-resize" id="hc-resize" title="Drag to resize"></div>
+        </div>
+      </div>
+      <div class="hc-under">
+        <div class="seg" id="hc-corners">${corners.map(([v, l]) => `<button type="button" data-corner="${v}">${l}</button>`).join("")}</div>
+        <div class="hc-size"><span>Size</span><input type="range" class="range" id="hc-size" min="8" max="60" step="1" value="${Math.round(h.size * 100)}"><span class="range-val" id="hc-size-val">${Math.round(h.size * 100)}%</span></div>
+      </div>
+      <div class="group-foot">Drag the camera to move it, or its corner to resize. Mind the killfeed (top right), minimap (top left) and abilities (bottom middle).</div>
+    </div>
+    ${group("Look", [
+      row("Shape", "", segB("capture.handcam.shape", [["rect", "Rectangle"], ["rounded", "Rounded"], ["circle", "Circle"]])),
+      h.shape === "circle" ? "" : row("Crop", "The camera picture is cropped to this shape.", segB("capture.handcam.aspect", [["16:9", "16:9"], ["4:3", "4:3"], ["1:1", "1:1"], ["3:4", "3:4"], ["9:16", "9:16"]])),
+      row("Border", "", segB("capture.handcam.border", [["none", "None"], ["white", "White"], ["black", "Black"]])),
+    ])}
+    ${group("Picture", [
+      row("Mirror", "Flip left and right.", toggle("capture.handcam.flip_h")),
+      row("Upside down", "Flip top and bottom.", toggle("capture.handcam.flip_v")),
+      row("Rotate", "For a phone held sideways.", segB("capture.handcam.rotate", [[0, "0°"], [90, "90°"], [180, "180°"], [270, "270°"]], true)),
+      row("Zoom", "Zooms into the middle of the picture.", `<input type="range" class="range" id="hc-zoom" min="100" max="300" step="5" value="${Math.round((h.zoom || 1) * 100)}"><span class="range-val" id="hc-zoom-val">${Math.round((h.zoom || 1) * 100)}%</span>`),
+    ])}
+    ${group("Timing", [
+      row("Camera delay", "Phone cameras arrive a little late. If your hands move after the game does, move this left.", `<input type="range" class="range" id="hc-delay" min="-1000" max="1000" step="20" value="${h.delay_ms}"><span class="range-val" id="hc-delay-val">${h.delay_ms > 0 ? "+" : ""}${h.delay_ms} ms</span>`),
+    ], "Clips with a hand cam take a few seconds longer to save, because the video is encoded again with the camera on it. Kills, map and agent are still read from the game alone.")}`;
+}
+
+async function hcLoadCams(force) {
+  if (hcState.loadingCams || (hcState.cams && !force)) return;
+  hcState.loadingCams = true;
+  try { hcState.cams = await invoke("list_cameras"); } catch { hcState.cams = []; }
+  hcState.loadingCams = false;
+  const d = setUI.draft && setUI.draft.capture.handcam;
+  if (d && !d.device && hcState.cams.length === 1) onDraftChange("capture.handcam.device", hcState.cams[0]);
+  else if (setUI.tab === "handcam") rerenderSettings();
+}
+
+async function hcLoadPicture() {
+  const h = setUI.draft && setUI.draft.capture.handcam;
+  if (!h || !h.enabled || !h.device || hcState.loadingImg) return;
+  hcState.loadingImg = true;
+  hcState.imgError = null;
+  const device = h.device;
+  try {
+    hcState.img = await invoke("camera_preview", { device });
+    hcState.imgDevice = device;
+  } catch (e) {
+    hcState.img = null;
+    hcState.imgError = String(e);
+  }
+  hcState.loadingImg = false;
+  if (state.view.name === "settings" && setUI.tab === "handcam") rerenderSettings();
+}
+
+// A frame from your newest clip behind the camera box.
+function hcLoadStage() {
+  if (hcState.stage !== null || !state.lib || !state.lib.clips.length) return;
+  hcState.stage = "";
+  const c = [...state.lib.clips].sort((a, b) => b.t - a.t)[0];
+  invoke("get_thumbnail", { path: c.path }).then((p) => {
+    hcState.stage = fileUrl(p);
+    const st = $("#hc-stage");
+    if (st) st.style.backgroundImage = `url('${hcState.stage}')`;
+  }).catch(() => {});
+}
+
+function wireHandcam() {
+  const h = setUI.draft.capture.handcam;
+  if (!h.enabled) return;
+  hcLoadCams(false);
+  hcLoadStage();
+  if (h.device && hcState.imgDevice !== h.device && !hcState.loadingImg && !hcState.imgError) hcLoadPicture();
+  const rescan = $("#hc-rescan");
+  if (rescan) rescan.onclick = () => { hcState.imgError = null; hcState.imgDevice = null; hcLoadCams(true).then(hcLoadPicture); };
+  const stage = $("#hc-stage");
+  const box = $("#hc-box");
+  if (!stage || !box) return;
+  const place = () => {
+    const b = hcBox(h);
+    Object.assign(box.style, { left: b.x * 100 + "%", top: b.y * 100 + "%", width: b.w * 100 + "%", height: b.h * 100 + "%" });
+    const r = box.getBoundingClientRect();
+    box.style.setProperty("--hc-w", r.width + "px");
+    box.style.setProperty("--hc-h", r.height + "px");
+    $("#hc-size").value = Math.round(h.size * 100);
+    $("#hc-size-val").textContent = Math.round(h.size * 100) + "%";
+    updateSaveBar();
+  };
+  place();
+  const set = (k, v) => { setPath(setUI.draft, "capture.handcam." + k, v); };
+  // Move: keep the grab point under the pointer; snap to the edges.
+  box.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.target.id === "hc-resize") return;
+    e.preventDefault();
+    box.setPointerCapture(e.pointerId);
+    const sr = stage.getBoundingClientRect();
+    const b = hcBox(h);
+    const gx = (e.clientX - sr.left) / sr.width - b.x;
+    const gy = (e.clientY - sr.top) / sr.height - b.y;
+    box.classList.add("dragging");
+    const move = (ev) => {
+      const bb = hcBox(h);
+      const snap = (v, max) => (v < 0.02 ? 0.02 : v > max - 0.02 ? max - 0.02 : v);
+      set("x", Math.round(snap((ev.clientX - sr.left) / sr.width - gx, 1 - bb.w) * 1000) / 1000);
+      set("y", Math.round(snap((ev.clientY - sr.top) / sr.height - gy, 1 - bb.h) * 1000) / 1000);
+      place();
+    };
+    const up = () => { box.classList.remove("dragging"); box.removeEventListener("pointermove", move); box.removeEventListener("pointerup", up); };
+    box.addEventListener("pointermove", move);
+    box.addEventListener("pointerup", up);
+  });
+  // Resize from the corner (keeps the top-left where it is).
+  $("#hc-resize").addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const sr = stage.getBoundingClientRect();
+    const move = (ev) => {
+      const b = hcBox(h);
+      const w = (ev.clientX - sr.left) / sr.width - b.x;
+      set("size", Math.round(Math.min(0.6, Math.max(0.08, w)) * 1000) / 1000);
+      place();
+    };
+    const up = () => { el.removeEventListener("pointermove", move); el.removeEventListener("pointerup", up); };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  });
+  $("#hc-corners").querySelectorAll("button").forEach((btn) => (btn.onclick = () => {
+    const b = hcBox(h);
+    const m = 0.02;
+    const c = btn.dataset.corner;
+    set("x", c[1] === "l" ? m : Math.round((1 - b.w - m) * 1000) / 1000);
+    set("y", c[0] === "t" ? m : Math.round((1 - b.h - m) * 1000) / 1000);
+    place();
+  }));
+  $("#hc-size").addEventListener("input", (e) => { set("size", Number(e.target.value) / 100); place(); });
+  const zoom = $("#hc-zoom");
+  zoom.addEventListener("input", () => {
+    set("zoom", Number(zoom.value) / 100);
+    $("#hc-zoom-val").textContent = zoom.value + "%";
+    $("#hc-pic").setAttribute("style", hcPictureStyle(h));
+    updateSaveBar();
+  });
+  const delay = $("#hc-delay");
+  delay.addEventListener("input", () => {
+    const v = Number(delay.value);
+    set("delay_ms", v);
+    $("#hc-delay-val").textContent = `${v > 0 ? "+" : ""}${v} ms`;
+    updateSaveBar();
+  });
+  [zoom, delay, $("#hc-size")].forEach((r) => {
+    const show = () => r.style.setProperty("--v", (r.value - r.min) / (r.max - r.min) * 100 + "%");
+    show();
+    r.addEventListener("input", show);
+  });
+}
+
+// ---------- storage: extra folders ----------
+
+function foldersGroup(d) {
+  const lib = state.lib || {};
+  const info = (p) => (lib.folders || []).find((f) => f.path.toLowerCase() === p.toLowerCase().replace(/[\\/]+$/, ""));
+  const rows = (d.extra_folders || []).map((p, i) => {
+    const f = info(p);
+    const sub = !f ? "Save to add it to your library." : !f.exists ? `<span class="bad-text">Folder not found</span>` : `${f.clip_count} clip${f.clip_count === 1 ? "" : "s"}`;
+    return row(`<span class="path-text">${esc(p)}</span>`, sub, `<button type="button" class="icon-btn" data-folder-del="${i}" title="Stop showing this folder"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>`);
+  });
+  rows.push(row("Add a folder", "Another app's clips folder, an old drive… Its sub-folders show up as games.", `<button type="button" class="btn" id="folder-add">Add folder</button>`));
+  return group("Also show clips from", rows, "Clipit only saves into your clips folder. These are just shown in your library.");
+}
+
+function wireFolders() {
+  const add = $("#folder-add");
+  if (add) add.onclick = async () => {
+    try {
+      const p = await invoke("pick_folder", { title: "Choose a folder with clips" });
+      if (!p) return;
+      const all = [setUI.draft.clips_root, ...(setUI.draft.extra_folders || [])].map((x) => (x || "").toLowerCase());
+      if (all.includes(p.toLowerCase())) return toast("That folder is already in your library");
+      onDraftChange("extra_folders", [...(setUI.draft.extra_folders || []), p]);
+      rerenderSettings();
+    } catch (e) { toast(String(e), true); }
+  };
+  main.querySelectorAll("[data-folder-del]").forEach((b) => (b.onclick = () => {
+    onDraftChange("extra_folders", setUI.draft.extra_folders.filter((_, i) => i !== Number(b.dataset.folderDel)));
+    rerenderSettings();
   }));
 }
 
@@ -2411,10 +2664,11 @@ function updateSaveBar() {
 }
 
 // Changes that add or remove rows rebuild the pane.
-const REBUILD = /^(window_mode|animation|theme_mode|capture\.(enabled|target|games_mode|codec|desktop_audio|mic|replay_secs|auto_clip_kills|auto_max_mb|auto_min_kills|auto_max_gap_secs|auto_whole_round_from|kill_before_secs|kill_after_secs|auto_skip_deathmatch|quality|fps|resolution))$/;
+const REBUILD = /^(capture\.handcam\.(enabled|device|shape|aspect|border|flip_h|flip_v|rotate)|window_mode|animation|theme_mode|capture\.(enabled|target|games_mode|codec|desktop_audio|mic|replay_secs|auto_clip_kills|auto_max_mb|auto_min_kills|auto_max_gap_secs|auto_whole_round_from|kill_before_secs|kill_after_secs|auto_skip_deathmatch|quality|fps|resolution))$/;
 
 function onDraftChange(path, value) {
   setPath(setUI.draft, path, value);
+  if (path === "capture.handcam.device" || path === "capture.handcam.enabled") { hcState.imgDevice = null; hcState.imgError = null; hcState.img = null; }
   if (path === "theme_mode" || path === "theme") applyTheme(setUI.draft.theme_mode, setUI.draft.theme);
   if (REBUILD.test(path) || path === "theme") rerenderSettings();
   else {
@@ -2468,6 +2722,8 @@ function wireSettings() {
     toast("Refreshing artwork");
   };
   wireFfmpegButtons(main);
+  if (setUI.tab === "handcam") wireHandcam();
+  if (setUI.tab === "storage") wireFolders();
   if ($("#upd-check")) $("#upd-check").onclick = () => checkForUpdate(false);
   if ($("#upd-install")) $("#upd-install").onclick = installUpdate;
   $("#set-save").onclick = saveSettingsDraft;
@@ -2496,7 +2752,7 @@ async function saveSettingsDraft() {
     }
     artErrorShown = false;
   }
-  if (patch.clips_root !== undefined || patch.steamgriddb_key !== undefined) {
+  if (patch.clips_root !== undefined || patch.extra_folders !== undefined || patch.steamgriddb_key !== undefined) {
     await loadLibrary();
     renderSidebar();
   }
@@ -2517,6 +2773,8 @@ function refreshSettingsBits() {
     box.outerHTML = capStatusRow(state.capStatus);
     wireFfmpegButtons(main);
   }
+  const hcs = $("#hc-status");
+  if (hcs && setUI.draft) hcs.innerHTML = hcStatusText(setUI.draft.capture.handcam);
   const sum = $("#auto-summary");
   if (sum && setUI.draft) sum.textContent = autoSummary(setUI.draft.capture);
 }

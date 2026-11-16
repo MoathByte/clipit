@@ -462,6 +462,23 @@ body.mode-app .shell { inset: 0; margin: 0; width: 100%; height: 100%; border-ra
 .vc-scrub { position: relative; height: 48px; border-radius: 10px; background: rgba(var(--ink), .04); cursor: pointer; touch-action: none; }
 .vc-wave { position: absolute; left: 0; top: 4px; width: 100%; height: 40px; pointer-events: none; }
 .vc-wave.played { clip-path: inset(0 100% 0 0); }
+/* hand cam placement */
+.hc-stage { position: relative; aspect-ratio: 16 / 9; border-radius: 12px; overflow: hidden; background: var(--panel-2) center / cover no-repeat; border: 1px solid var(--line); user-select: none; touch-action: none; }
+.hc-box { position: absolute; cursor: grab; }
+.hc-box.dragging { cursor: grabbing; }
+.hc-clip { position: absolute; inset: 0; overflow: hidden; background: #0d0d0d; box-shadow: 0 6px 24px rgba(0,0,0,.4); outline: 1px dashed rgba(255,255,255,.55); outline-offset: 2px; }
+.hc-box.shape-rounded .hc-clip { border-radius: calc(min(var(--hc-w, 100px), var(--hc-h, 100px)) * .12); }
+.hc-box.shape-circle .hc-clip { border-radius: 50%; }
+.hc-clip::after { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; }
+.hc-box.border-white .hc-clip::after { border: max(2px, calc(var(--hc-w, 100px) * .012)) solid #fff; }
+.hc-box.border-black .hc-clip::after { border: max(2px, calc(var(--hc-w, 100px) * .012)) solid #000; }
+.hc-pic { position: absolute; left: 50%; top: 50%; width: 100%; height: 100%; translate: -50% -50%; display: grid; place-items: center; color: rgba(255,255,255,.6); font-size: 12px; text-align: center; padding: 4px; }
+.hc-pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.hc-resize { position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px; border-radius: 4px; background: var(--accent); border: 2px solid var(--panel); cursor: nwse-resize; }
+.hc-under { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-top: 10px; }
+.hc-size { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+.bad-text { color: var(--danger); }
+.path-text { word-break: break-all; font-size: 13px; font-weight: 500; }
 .vc-kills, .trim-kills { position: absolute; inset: 0; pointer-events: none; }
 .kill-mark { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--accent); opacity: .55; }
 .vc-kills .kill-mark { pointer-events: auto; cursor: pointer; width: 14px; margin-left: -7px; background: none; opacity: 1; }

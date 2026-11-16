@@ -137,6 +137,21 @@ pub const TAP_H: usize = 290;
 
 /// ffmpeg args for the capture. With `tap`, the same captured frames also go,
 /// four a second and cropped to the killfeed corner, as raw BGR to that pipe.
+/// Encoder settings for `e` at a bitrate, with a keyframe every `gop` frames.
+pub fn encode_args(e: &str, kbps: u32, max_kbps: u32, gop: u32) -> Vec<String> {
+    let (b, m, buf, g) = (format!("{kbps}k"), format!("{max_kbps}k"), format!("{}k", max_kbps * 2), gop.to_string());
+    let enc: Vec<&str> = if e.ends_with("_nvenc") {
+        vec!["-c:v", e, "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0", "-spatial-aq", "1"]
+    } else if e.ends_with("_amf") {
+        vec!["-c:v", e, "-usage", "lowlatency", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0"]
+    } else if e.ends_with("_qsv") {
+        vec!["-c:v", e, "-preset", "faster", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0"]
+    } else {
+        vec!["-c:v", e, "-preset", "veryfast", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0"]
+    };
+    enc.iter().map(|s| s.to_string()).collect()
+}
+
 pub fn args(source: &Source, plan: &Plan, cursor: bool, tap: Option<&str>) -> Vec<String> {
     let mut src = match source {
         Source::Window(h) => format!("gfxcapture=hwnd={}", *h as u64),
@@ -166,22 +181,12 @@ pub fn args(source: &Source, plan: &Plan, cursor: bool, tap: Option<&str>) -> Ve
         src.push_str("[vid]");
     }
 
-    let (b, m, buf) = (format!("{}k", plan.kbps), format!("{}k", plan.max_kbps), format!("{}k", plan.max_kbps * 2));
-    let g = plan.fps.to_string(); // a keyframe every second: clips start within 1 s of where you asked
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-filter_complex", &src].iter().map(|s| s.to_string()).collect();
     if tap.is_some() {
         a.extend(["-map".to_string(), "[vid]".to_string()]);
     }
-    let enc: Vec<&str> = if e.ends_with("_nvenc") {
-        vec!["-c:v", e, "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0", "-spatial-aq", "1"]
-    } else if e.ends_with("_amf") {
-        vec!["-c:v", e, "-usage", "lowlatency", "-quality", "balanced", "-rc", "vbr_peak", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0"]
-    } else if e.ends_with("_qsv") {
-        vec!["-c:v", e, "-preset", "faster", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0"]
-    } else {
-        vec!["-c:v", e, "-preset", "veryfast", "-b:v", &b, "-maxrate", &m, "-bufsize", &buf, "-g", &g, "-bf", "0"]
-    };
-    a.extend(enc.iter().map(|s| s.to_string()));
+    // A keyframe every second: clips start within 1 s of where you asked.
+    a.extend(encode_args(e, plan.kbps, plan.max_kbps, plan.fps));
     a.extend(
         ["-an", "-fps_mode", "passthrough", "-f", "mpegts", "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1", "pipe:1"]
             .iter()

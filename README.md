@@ -23,6 +23,10 @@
   and still reach the game; they're read with Raw Input, so nothing is hooked and the key isn't taken from other apps.
 - **Recording**: start and stop with another hotkey. Crash-safe: an interrupted recording is recovered on the next start.
 - **Game window only** (nothing runs until a game is in focus, and pop-ups never end up in your clips) or **whole monitor**.
+- **Hand cam** (optional): a webcam or phone camera added onto your saved clips. Drag it into place on a preview and
+  pick size, shape (rectangle, rounded, circle), crop, border, mirror, rotation, zoom and a timing offset. The camera
+  is recorded into its own small RAM buffer and only runs while a game is captured; the game recording itself is
+  never changed until a clip is saved.
 - Desktop audio and microphone, each on any device, with volume, mic noise suppression and optional separate tracks.
 - 720p to native, 30–144 fps, H.264 / HEVC / AV1 on your graphics card.
 
@@ -47,6 +51,8 @@
   then **Compress & Copy** to paste the file straight into Discord.
 - **Review**: go through new clips one by one: keep, delete to the Recycle Bin, skip, undo.
 - Favorites, rename, search, game artwork from SteamGridDB (optional free API key).
+- **Library folders**: every folder in your clips folder is a game, and you can add other folders (another app's
+  clips, an old drive) to show their clips too.
 
 **Make it yours**
 - Dark, Light or Match Windows, in three palettes: **Tally** (vermilion), **Volt** (chartreuse) and **Bubblegum** (pink).
@@ -154,6 +160,7 @@ src-tauri/src/
     mux.rs           saving clips, live recording, named pipes
     killfeed.rs      your kills in the killfeed (and when), round tracking
     valorant.rs      map + agent recognition, reference images
+    handcam.rs       hand cam: camera buffer, placement, adding it to clips
     game.rs, sound.rs
 scripts/release.mjs  signed release → GitHub
 ```

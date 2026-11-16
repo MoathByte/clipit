@@ -6,6 +6,9 @@ use std::path::PathBuf;
 pub struct Config {
     /// Folder clips are saved into. Each game gets its own sub-folder.
     pub clips_root: String,
+    /// More folders to show clips from (e.g. another app's clips folder).
+    /// Their sub-folders are games too; Clipit only saves into `clips_root`.
+    pub extra_folders: Vec<String>,
     /// Optional SteamGridDB API key used to fetch game artwork.
     pub steamgriddb_key: String,
     /// Global hotkey that opens the quick view.
@@ -40,6 +43,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             clips_root: default_clips_root(),
+            extra_folders: Vec::new(),
             steamgriddb_key: String::new(),
             hotkey: "Alt+Z".into(),
             export_dir: String::new(),
@@ -113,6 +117,63 @@ pub struct Capture {
     pub auto_skip_deathmatch: bool,
     /// Largest auto clip (MB); longer highlights keep their end.
     pub auto_max_mb: u32,
+    /// A camera (hand cam) added onto saved clips.
+    pub handcam: HandCam,
+}
+
+/// Hand cam: a camera recorded next to the game and added onto every saved clip
+/// (never shown live, never in the replay buffer itself).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct HandCam {
+    pub enabled: bool,
+    /// DirectShow camera name, e.g. "Iriun Webcam".
+    pub device: String,
+    /// Capture height: 480, 720 or 1080.
+    pub height: u32,
+    /// 30 or 60.
+    pub fps: u32,
+    /// Top-left corner of the camera box, as a fraction of the frame (0–1).
+    pub x: f64,
+    pub y: f64,
+    /// Width of the camera box, as a fraction of the frame width.
+    pub size: f64,
+    /// "16:9", "4:3", "1:1", "3:4" or "9:16" (the picture is cropped to it).
+    pub aspect: String,
+    /// "rect", "rounded" or "circle".
+    pub shape: String,
+    /// "none", "white", "black" or "accent".
+    pub border: String,
+    pub flip_h: bool,
+    pub flip_v: bool,
+    /// 0, 90, 180 or 270 degrees clockwise.
+    pub rotate: u32,
+    /// Zoom into the middle of the picture (1 = whole picture).
+    pub zoom: f64,
+    /// Shifts the camera in time to match the game (ms; positive = later).
+    pub delay_ms: i32,
+}
+
+impl Default for HandCam {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device: String::new(),
+            height: 720,
+            fps: 30,
+            x: 0.73,
+            y: 0.68,
+            size: 0.25,
+            aspect: "16:9".into(),
+            shape: "rounded".into(),
+            border: "none".into(),
+            flip_h: false,
+            flip_v: false,
+            rotate: 0,
+            zoom: 1.0,
+            delay_ms: 0,
+        }
+    }
 }
 
 impl Default for Capture {
@@ -150,6 +211,7 @@ impl Default for Capture {
             auto_whole_round_from: 4,
             auto_skip_deathmatch: true,
             auto_max_mb: 300,
+            handcam: HandCam::default(),
         }
     }
 }
@@ -163,6 +225,21 @@ pub struct GameRule {
 }
 
 impl Config {
+    /// The clips folder first, then the extra folders (no blanks or repeats).
+    pub fn library_folders(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for f in std::iter::once(&self.clips_root).chain(self.extra_folders.iter()) {
+            let mut f = f.trim().trim_end_matches(['\\', '/']).to_string();
+            if f.ends_with(':') {
+                f.push('\\'); // "D:" alone means "the current folder on D:"
+            }
+            if !f.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(&f)) {
+                out.push(f);
+            }
+        }
+        out
+    }
+
     pub fn load(path: &PathBuf) -> Self {
         std::fs::read_to_string(path)
             .ok()

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0
+
+- **Hand cam**: add a camera (a webcam, or your phone through an app like Iriun Webcam) to your clips. Pick the camera,
+  drag it where you want it on a preview, resize it, and choose rectangle, rounded or circle, a crop (16:9 to 9:16),
+  a border, mirror, upside down, rotation, zoom and a timing offset. It's only added to saved clips (replays, auto
+  clips and recordings) and the camera only runs while a game is captured. Off by default: **Settings → Hand cam**.
+- **More folders in your library**: show clips from other folders too (Settings → Storage → Also show clips from).
+- **Every folder is a game**: each folder in your clips folder shows up as a game, even when it's empty, and clips in
+  folders inside it count for that game.
+
 ## 0.11.0
 
 - **Kills on the timeline**: VALORANT clips show a marker for each of your kills on the player's timeline (and in the

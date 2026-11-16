@@ -67,6 +67,17 @@ pub struct Library {
     pub root_exists: bool,
     pub games: Vec<Game>,
     pub clips: Vec<Clip>,
+    /// Every folder shown in the library, the clips folder first.
+    pub folders: Vec<Folder>,
+}
+
+#[derive(Serialize)]
+pub struct Folder {
+    pub path: String,
+    pub exists: bool,
+    pub clip_count: usize,
+    /// The clips folder (where new clips are saved).
+    pub main: bool,
 }
 
 pub fn is_video(path: &Path) -> bool {
@@ -149,34 +160,81 @@ pub fn clip_from(path: &Path, game: &str, flags: &Flags) -> Option<Clip> {
     })
 }
 
-pub fn scan(root: &str, flags: &Flags) -> Library {
-    let root_path = Path::new(root);
-    let mut clips = Vec::new();
+/// Folders that are never games.
+fn skip_dir(name: &str) -> bool {
+    name.starts_with('.') || name.starts_with('$') || name.eq_ignore_ascii_case("System Volume Information")
+}
 
-    if let Ok(entries) = std::fs::read_dir(root_path) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let game = entry.file_name().to_string_lossy().into_owned();
-                if let Ok(files) = std::fs::read_dir(&path) {
-                    for f in files.flatten() {
-                        let p = f.path();
-                        if is_video(&p) {
-                            if let Some(c) = clip_from(&p, &game, flags) {
-                                clips.push(c);
-                            }
-                        }
-                    }
+/// Videos in `dir` and its sub-folders (a few levels deep).
+fn videos_in(dir: &Path, depth: usize, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if is_dir {
+            if depth > 0 && !skip_dir(&e.file_name().to_string_lossy()) {
+                videos_in(&p, depth - 1, out);
+            }
+        } else if is_video(&p) {
+            out.push(p);
+        }
+    }
+}
+
+/// The game a clip belongs to: the first folder under the library folder it's in.
+/// Loose files are "Other" in the clips folder, or named after an extra folder.
+pub fn game_of(path: &Path, folders: &[String]) -> String {
+    for (i, f) in folders.iter().enumerate() {
+        let root = Path::new(f);
+        if let Ok(rel) = path.strip_prefix(root) {
+            let mut parts = rel.components();
+            let first = parts.next();
+            return match (first, parts.next()) {
+                (Some(dir), Some(_)) => dir.as_os_str().to_string_lossy().into_owned(),
+                _ if i == 0 => "Other".into(),
+                _ => root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Other".into()),
+            };
+        }
+    }
+    "Other".into()
+}
+
+/// Scans the clips folder plus any extra folders. Every folder directly inside one
+/// is a game (even an empty one); clips in deeper folders count for that game.
+pub fn scan(folders: &[String], flags: &Flags) -> Library {
+    let root = folders.first().cloned().unwrap_or_default();
+    let mut clips: Vec<Clip> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut games: Vec<Game> = Vec::new();
+    let mut infos = Vec::new();
+    for (i, folder) in folders.iter().enumerate() {
+        let fp = Path::new(folder);
+        let mut count = 0;
+        if let Ok(entries) = std::fs::read_dir(fp) {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.file_type().map(|t| t.is_dir()).unwrap_or(false) && !skip_dir(&name) && !games.iter().any(|g| g.name.eq_ignore_ascii_case(&name)) {
+                    games.push(Game { name, clip_count: 0, total_size: 0, latest_ms: 0 });
                 }
-            } else if is_video(&path) {
-                if let Some(c) = clip_from(&path, "Other", flags) {
+            }
+            let mut files = Vec::new();
+            videos_in(fp, 4, &mut files);
+            for p in files {
+                if !seen.insert(p.to_string_lossy().to_lowercase()) {
+                    continue; // an extra folder inside another one
+                }
+                let game = game_of(&p, &folders[..=i]);
+                // Folder names differ only by case: one game.
+                let game = games.iter().find(|g| g.name.eq_ignore_ascii_case(&game)).map(|g| g.name.clone()).unwrap_or(game);
+                if let Some(c) = clip_from(&p, &game, flags) {
+                    count += 1;
                     clips.push(c);
                 }
             }
         }
+        infos.push(Folder { path: folder.clone(), exists: fp.is_dir(), clip_count: count, main: i == 0 });
     }
 
-    let mut games: Vec<Game> = Vec::new();
     for c in &clips {
         match games.iter_mut().find(|g| g.name == c.game) {
             Some(g) => {
@@ -192,14 +250,15 @@ pub fn scan(root: &str, flags: &Flags) -> Library {
             }),
         }
     }
-    // Most recently played first.
-    games.sort_by(|a, b| b.latest_ms.cmp(&a.latest_ms));
+    // Most recently played first; empty folders last, by name.
+    games.sort_by(|a, b| b.latest_ms.cmp(&a.latest_ms).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 
     Library {
-        root: root.to_string(),
-        root_exists: root_path.is_dir(),
+        root_exists: Path::new(&root).is_dir(),
+        root,
         games,
         clips,
+        folders: infos,
     }
 }
 
@@ -223,6 +282,29 @@ mod tests {
         assert_eq!(custom_title("Ace on Ascent.mp4", "Valorant").as_deref(), Some("Ace on Ascent"));
         // Edited copies keep the date, so they sort next to the original.
         assert_eq!(custom_title("Valorant 2026.07.06 - 06.43.28.03 (edited).mp4", "Valorant"), None);
+    }
+
+    #[test]
+    fn games_are_folders_and_extra_folders_count() {
+        let dir = std::env::temp_dir().join(format!("clipit-scan-{}", std::process::id()));
+        let main = dir.join("Clips");
+        let extra = dir.join("Old clips");
+        for d in [main.join("Valorant").join("Highlights"), main.join("Empty game"), extra.join("Valorant"), extra.clone()] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        for f in [main.join("Valorant").join("a.mp4"), main.join("Valorant").join("Highlights").join("b.mp4"), main.join("loose.mp4"), extra.join("Valorant").join("c.mp4"), extra.join("d.mkv")] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let (fav, rev, meta) = (BTreeSet::new(), BTreeSet::new(), std::collections::BTreeMap::new());
+        let folders = vec![main.to_string_lossy().into_owned(), extra.to_string_lossy().into_owned()];
+        let lib = scan(&folders, &Flags { favorites: &fav, reviewed: &rev, meta: &meta });
+        let count = |n: &str| lib.games.iter().find(|g| g.name == n).map(|g| g.clip_count);
+        assert_eq!(count("Valorant"), Some(3));
+        assert_eq!(count("Empty game"), Some(0));
+        assert_eq!(count("Other"), Some(1));
+        assert_eq!(count("Old clips"), Some(1));
+        assert_eq!(lib.folders.iter().map(|f| f.clip_count).collect::<Vec<_>>(), vec![3, 2]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
