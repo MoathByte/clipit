@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.3
+
+- **Hand cam back to how 0.12.0 worked** (the camera is added to saved clips, not drawn live), which fixes the
+  dropped frames and hangs some people had in 0.12.1–0.12.2.
+- **Fix: saving with a hand cam was slow.** The clip now saves instantly like any other; the camera is added a few
+  seconds later in the background (on the graphics card with NVIDIA) and the file is swapped in when it's ready.
+- **Fix: hand cam clips were much bigger.** The camera version keeps the clip's own bitrate, so it's about the same size.
+- Kept from 0.12.2: webcams are asked for a mode they can send smoothly.
+
 ## 0.12.2
 
 - **Fix: choppy hand cam (2–5 fps) on some webcams.** Clipit now asks the camera for a size and frame rate it can

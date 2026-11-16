@@ -27,7 +27,8 @@
   pick size, shape (rectangle, rounded, circle), crop, border, mirror, rotation, zoom and a timing offset. Brightness,
   contrast, saturation, gamma, colour temperature and sharpness work with any camera; the camera's own settings window
   (exposure, white balance, focus) opens from Clipit too. The camera
-  is drawn onto the game live while recording (like OBS), so saving stays instant; the Hand cam settings show it live.
+  is recorded into its own small RAM buffer while a game is captured; clips save instantly and the camera is added in
+  the background a few seconds later, at the clip's own size.
 - Desktop audio and microphone, each on any device, with volume, mic noise suppression and optional separate tracks.
 - 720p to native, 30–144 fps, H.264 / HEVC / AV1 on your graphics card.
 
@@ -161,8 +162,7 @@ src-tauri/src/
     mux.rs           saving clips, live recording, named pipes
     killfeed.rs      your kills in the killfeed (and when), round tracking
     valorant.rs      map + agent recognition, reference images
-    handcam.rs       hand cam: cameras, placement, picture chain, shapes
-    camfeed.rs       hand cam live: camera process, steady feed into the capture
+    handcam.rs       hand cam: camera buffer, placement, adding it to clips
     game.rs, sound.rs
 scripts/release.mjs  signed release → GitHub
 ```

@@ -2359,6 +2359,16 @@ function hcStatusText(h) {
   return "The camera turns on with the game capture (save first if you just changed it).";
 }
 
+function hcPictureStyle(h) {
+  const t = [];
+  if (h.rotate) t.push(`rotate(${h.rotate}deg)`);
+  if (h.flip_h) t.push("scaleX(-1)");
+  if (h.flip_v) t.push("scaleY(-1)");
+  t.push(`scale(${Math.max(1, h.zoom || 1)})`);
+  const sideways = h.rotate === 90 || h.rotate === 270;
+  return `transform:${t.join(" ")};${sideways ? "width:var(--hc-h);height:var(--hc-w);" : ""}`;
+}
+
 function handcamPane(d) {
   const h = d.capture.handcam;
   const intro = group("", [row("Add a hand cam to clips", "Records a camera next to the game and puts it on every clip you save, auto clips too. It's only added to saved clips, and the camera is only on while a game is captured.", toggle("capture.handcam.enabled"))]);
@@ -2370,10 +2380,9 @@ function handcamPane(d) {
     ? `<span class="row-sub">Looking for cameras…</span>`
     : `${selectB("capture.handcam.device", [["", list.length ? "Choose a camera" : "No camera found"], ...list.map((c) => [c, c])])}<button type="button" class="icon-btn" id="hc-rescan" title="Look for cameras again"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>`;
   const b = hcBox(h);
-  const live = !!(hcState.img && hcState.imgDevice === h.device);
-  const pic = live
+  const pic = hcState.img && hcState.imgDevice === h.device
     ? `<img src="${hcState.img}" alt="" draggable="false">`
-    : `<span>${h.device ? esc(hcState.imgError || "Starting the camera…") : "Camera"}</span>`;
+    : `<span>${h.device ? (hcState.loadingImg ? "Getting a picture…" : esc(hcState.imgError || "No picture yet")) : "Camera"}</span>`;
   const corners = [["tl", "Top left"], ["tr", "Top right"], ["bl", "Bottom left"], ["br", "Bottom right"]];
   return `<h2>Hand cam</h2><p class="lede">Show your hands or face in your clips.</p>${intro}
     ${group("Camera", [
@@ -2385,13 +2394,14 @@ function handcamPane(d) {
     <div class="group">
       <div class="group-title">Placement</div>
       <div class="hc-stage" id="hc-stage" style="${hcState.stage ? `background-image:url('${hcState.stage}')` : ""}">
-        <div class="hc-box shape-${esc(h.shape)} border-${esc(h.border)}${live ? " live" : ""}" id="hc-box" style="left:${b.x * 100}%;top:${b.y * 100}%;width:${b.w * 100}%;height:${b.h * 100}%">
-          <div class="hc-clip"><div class="hc-pic" id="hc-pic">${pic}</div></div>
+        <div class="hc-box shape-${esc(h.shape)} border-${esc(h.border)}" id="hc-box" style="left:${b.x * 100}%;top:${b.y * 100}%;width:${b.w * 100}%;height:${b.h * 100}%">
+          <div class="hc-clip"><div class="hc-pic" id="hc-pic" style="${hcPictureStyle(h)}">${pic}</div></div>
           <div class="hc-resize" id="hc-resize" title="Drag to resize"></div>
         </div>
       </div>
       <div class="hc-under">
         <div class="seg" id="hc-corners">${corners.map(([v, l]) => `<button type="button" data-corner="${v}">${l}</button>`).join("")}</div>
+        <button type="button" class="btn ghost" id="hc-refresh"${h.device ? "" : " disabled"}>New picture</button>
         <div class="hc-size"><span>Size</span><input type="range" class="range" id="hc-size" min="8" max="60" step="1" value="${Math.round(h.size * 100)}"><span class="range-val" id="hc-size-val">${Math.round(h.size * 100)}%</span></div>
       </div>
       <div class="group-foot">Drag the camera to move it, or its corner to resize. Mind the killfeed (top right), minimap (top left) and abilities (bottom middle).</div>
@@ -2409,8 +2419,8 @@ function handcamPane(d) {
     ])}
     ${group("Adjustments", hcAdjustRows(h), "Applied by Clipit, so they work with any camera. The preview shows the result.")}
     ${group("Timing", [
-      row("Delay camera", "If the camera is ahead of the game (your hand moves before the shot happens), hold it back here.", `<input type="range" class="range" id="hc-delay" min="0" max="1000" step="10" value="${Math.max(0, h.delay_ms)}"><span class="range-val" id="hc-delay-val">${Math.max(0, h.delay_ms)} ms</span>`),
-    ], "The camera is drawn onto the game while it records, like a camera source in OBS, so saving stays instant. While it's on, recording uses a little more CPU (under one core).")}`;
+      row("Camera delay", "Phone cameras arrive a little late. If your hands move after the game does, move this left.", `<input type="range" class="range" id="hc-delay" min="-1000" max="1000" step="20" value="${h.delay_ms}"><span class="range-val" id="hc-delay-val">${h.delay_ms > 0 ? "+" : ""}${h.delay_ms} ms</span>`),
+    ], "Clips save instantly. The camera is added a few seconds later in the background, on the graphics card when it can, and the clip keeps its size. Kills, map and agent are read from the game alone.")}`;
 }
 
 async function hcLoadCams(force) {
@@ -2423,34 +2433,42 @@ async function hcLoadCams(force) {
   else if (setUI.tab === "handcam") rerenderSettings();
 }
 
-// Live preview: asks for the newest frame about 8 times a second while the Hand
-// cam tab is open. The camera runs with the settings being edited.
-let hcPollTimer = 0;
-let hcPolling = false;
-function hcPoll() {
-  clearTimeout(hcPollTimer);
+async function hcLoadPicture(fresh = true) {
   const h = setUI.draft && setUI.draft.capture.handcam;
-  const open = state.view.name === "settings" && setUI.tab === "handcam" && h && h.enabled && h.device && document.visibilityState === "visible";
-  if (!open) { hcPolling = false; return; }
-  hcPolling = true;
-  invoke("handcam_preview", { handcam: h })
-    .then((url) => {
-      hcState.imgError = null;
-      if (!url) return;
-      const fresh = hcState.imgDevice !== h.device || !hcState.img;
-      hcState.img = url;
-      hcState.imgDevice = h.device;
-      const box = $("#hc-box");
+  if (!h || !h.enabled || !h.device || hcState.loadingImg) return;
+  hcState.loadingImg = true;
+  hcState.imgError = null;
+  const device = h.device;
+  try {
+    hcState.img = await invoke("camera_preview", { handcam: h, fresh });
+    hcState.imgDevice = device;
+  } catch (e) {
+    hcState.img = null;
+    hcState.imgError = String(e);
+  }
+  hcState.loadingImg = false;
+  if (state.view.name === "settings" && setUI.tab === "handcam") rerenderSettings();
+}
+
+// Sliders: re-adjust the last picture (fast) and swap it in without rebuilding.
+let hcAdjustTimer = 0;
+let hcAdjustBusy = false;
+let hcAdjustAgain = false;
+function hcAdjustPreview() {
+  clearTimeout(hcAdjustTimer);
+  hcAdjustTimer = setTimeout(async () => {
+    const h = setUI.draft && setUI.draft.capture.handcam;
+    if (!h || !h.device || !hcState.img) return;
+    if (hcAdjustBusy) { hcAdjustAgain = true; return; }
+    hcAdjustBusy = true;
+    try {
+      hcState.img = await invoke("camera_preview", { handcam: h, fresh: false });
       const img = $("#hc-pic img");
-      if (img) img.src = url;
-      else if (box && fresh) { $("#hc-pic").innerHTML = `<img src="${url}" alt="" draggable="false">`; box.classList.add("live"); }
-    })
-    .catch((e) => {
-      hcState.imgError = String(e);
-      const span = $("#hc-pic span");
-      if (span) span.textContent = hcState.imgError;
-    })
-    .finally(() => { hcPollTimer = setTimeout(hcPoll, 120); });
+      if (img) img.src = hcState.img;
+    } catch {}
+    hcAdjustBusy = false;
+    if (hcAdjustAgain) { hcAdjustAgain = false; hcAdjustPreview(); }
+  }, 120);
 }
 
 const HC_ADJ = [
@@ -2488,17 +2506,21 @@ function wireHandcam() {
   if (!h.enabled) return;
   hcLoadCams(false);
   hcLoadStage();
-  if (!hcPolling) hcPoll();
+  if (h.device && hcState.imgDevice !== h.device && !hcState.loadingImg && !hcState.imgError) hcLoadPicture();
   const dlg = $("#hc-dialog");
   if (dlg) dlg.onclick = async () => {
     dlg.disabled = true;
     dlg.textContent = "Open in another window";
     try {
       await invoke("camera_settings", { device: h.device });
+      hcState.imgDevice = null;
+      hcLoadPicture(true);
     } catch (e) { toast(String(e), true); }
     dlg.disabled = false;
     dlg.textContent = "Open";
   };
+  const fresh = $("#hc-refresh");
+  if (fresh) fresh.onclick = () => { hcState.imgError = null; hcLoadPicture(true); };
   main.querySelectorAll("[data-hc-adj]").forEach((r) => {
     const k = r.dataset.hcAdj;
     const spec = HC_ADJ.find((a) => a[0] === k);
@@ -2511,6 +2533,7 @@ function wireHandcam() {
       main.querySelector(`[data-hc-reset="${k}"]`).classList.toggle("invisible", v === spec[5]);
       show();
       updateSaveBar();
+      hcAdjustPreview();
     });
   });
   main.querySelectorAll("[data-hc-reset]").forEach((b) => (b.onclick = () => {
@@ -2521,7 +2544,7 @@ function wireHandcam() {
     r.dispatchEvent(new Event("input"));
   }));
   const rescan = $("#hc-rescan");
-  if (rescan) rescan.onclick = () => { hcState.imgError = null; hcLoadCams(true); };
+  if (rescan) rescan.onclick = () => { hcState.imgError = null; hcState.imgDevice = null; hcLoadCams(true).then(hcLoadPicture); };
   const stage = $("#hc-stage");
   const box = $("#hc-box");
   if (!stage || !box) return;
@@ -2588,13 +2611,14 @@ function wireHandcam() {
   zoom.addEventListener("input", () => {
     set("zoom", Number(zoom.value) / 100);
     $("#hc-zoom-val").textContent = zoom.value + "%";
+    $("#hc-pic").setAttribute("style", hcPictureStyle(h));
     updateSaveBar();
   });
   const delay = $("#hc-delay");
   delay.addEventListener("input", () => {
     const v = Number(delay.value);
     set("delay_ms", v);
-    $("#hc-delay-val").textContent = `${v} ms`;
+    $("#hc-delay-val").textContent = `${v > 0 ? "+" : ""}${v} ms`;
     updateSaveBar();
   });
   [zoom, delay, $("#hc-size")].forEach((r) => {
@@ -2904,6 +2928,20 @@ listen("clip-saved", (e) => {
   lastSavedClip = e.payload.path;
   const k = e.payload.kills;
   toast(k ? `Auto clipped ${k === 5 ? "an ace" : "a " + multiText(k)} · ${fmtSize(e.payload.size || 0)}` : `Clip saved · ${fmtSize(e.payload.size || 0)}`);
+});
+// The hand cam was added to a clip saved a moment ago: show the new version.
+listen("clip-updated", (e) => {
+  const { path, size } = e.payload;
+  findClips(path).forEach((c) => { c.size = size; c.modified_ms = Date.now(); });
+  state.thumbs.delete(path);
+  const cur = state.player && state.player.list[state.player.index];
+  if (cur && cur.path === path) {
+    const t = video.currentTime;
+    const playing = !video.paused;
+    loadClipVideo(cur, t, playing);
+  }
+  if (state.view.name !== "settings") rerenderKeepScroll();
+  toast("Hand cam added");
 });
 // Read from the saved file a few seconds after a VALORANT clip is saved.
 listen("clip-info", (e) => {

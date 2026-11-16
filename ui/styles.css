@@ -474,10 +474,6 @@ body.mode-app .shell { inset: 0; margin: 0; width: 100%; height: 100%; border-ra
 .hc-box.border-black .hc-clip::after { border: max(2px, calc(var(--hc-w, 100px) * .012)) solid #000; }
 .hc-pic { position: absolute; left: 50%; top: 50%; width: 100%; height: 100%; translate: -50% -50%; display: grid; place-items: center; color: rgba(255,255,255,.6); font-size: 12px; text-align: center; padding: 4px; }
 .hc-pic img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
-/* Live frames come shaped and bordered already. */
-.hc-box.live .hc-clip { background: none; border-radius: 0; overflow: visible; box-shadow: none; }
-.hc-box.live .hc-clip::after { display: none; }
-.hc-box.live .hc-pic img { object-fit: fill; filter: drop-shadow(0 6px 16px rgba(0,0,0,.4)); }
 .hc-resize { position: absolute; right: -6px; bottom: -6px; width: 14px; height: 14px; border-radius: 4px; background: var(--accent); border: 2px solid var(--panel); cursor: nwse-resize; }
 .hc-under { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; margin-top: 10px; }
 .hc-size { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
