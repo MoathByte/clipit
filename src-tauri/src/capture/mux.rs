@@ -15,7 +15,11 @@ use super::ts::Snapshot;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
-const BELOW_NORMAL_PRIORITY: u32 = 0x0000_4000;
+/// Clip saves and the recording muxer run at the game's own (normal) priority.
+/// At below-normal a busy game starved them: a 15 s clip took ~20 s to save
+/// with every core in use, instead of half a second. They're short bursts
+/// (copying video, encoding a little audio), so the game barely notices.
+const SAVE_PRIORITY: u32 = 0x0000_0020; // NORMAL_PRIORITY_CLASS
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct AudioOpts {
@@ -233,7 +237,7 @@ fn base_cmd(ffmpeg: &Path) -> Command {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-nostdin"]);
     #[cfg(windows)]
-    cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY);
+    cmd.creation_flags(CREATE_NO_WINDOW | SAVE_PRIORITY);
     cmd
 }
 

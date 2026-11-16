@@ -542,9 +542,14 @@ fn on_role(app: &AppHandle, role: usize) {
     match Some(role) {
         Some(0) => toggle_main(app),
         Some(1) => {
-            if let Err(e) = state.engine.save_replay() {
-                capture_error(app, &cfg, &e);
-            }
+            // Off the main thread (hotkeys arrive there): a busy lock in the
+            // recorder must never freeze the window or delay the next key.
+            let (app, engine) = (app.clone(), state.engine.clone());
+            std::thread::spawn(move || {
+                if let Err(e) = engine.save_replay() {
+                    capture_error(&app, &cfg, &e);
+                }
+            });
         }
         Some(2) => {
             let app = app.clone();
@@ -1492,9 +1497,13 @@ async fn capture_info(state: State<'_, AppState>) -> Result<CaptureInfo, String>
     .map_err(|e| e.to_string())
 }
 
+/// Async so it never runs on (and can never stall) the window's main thread.
 #[tauri::command]
-fn save_replay(state: State<AppState>) -> Result<(), String> {
-    state.engine.save_replay()
+async fn save_replay(state: State<'_, AppState>) -> Result<(), String> {
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || engine.save_replay())
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

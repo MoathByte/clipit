@@ -3410,7 +3410,10 @@ function updateRecWidget() {
 }
 
 $("#update-btn").onclick = installUpdate;
-$("#rec-save").onclick = () => invoke("save_replay").catch((e) => toast(String(e), true));
+$("#rec-save").onclick = () => {
+  toast("Saving clip…"); // "Clip saved" follows in a moment
+  invoke("save_replay").catch((e) => toast(String(e), true));
+};
 $("#rec-toggle").onclick = async () => {
   $("#rec-toggle").disabled = true;
   try { await invoke("toggle_recording"); } catch (e) { toast(String(e), true); }

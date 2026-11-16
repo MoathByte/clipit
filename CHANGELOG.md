@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.1
+
+### Fixed
+- **Clips save in about a second again, even mid-match.** Saving ran at a low priority, so a busy game could hold it
+  up for many seconds (over a minute on a fully loaded PC), and on slower PCs it could look like nothing was clipped.
+  Saving now gets its fair share of the CPU: a 30 s clip takes under a second while you play.
+- **The clip button and clip hotkey no longer lag.** Saving starts in the background, so pressing the key or button
+  never holds up Clipit's window, and the clip still ends exactly where you pressed. The button says "Saving clip…"
+  right away.
+
 ## 0.13.0
 
 ### New

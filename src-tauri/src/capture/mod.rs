@@ -778,6 +778,8 @@ impl Engine {
 
     /// Saves the last N seconds. Returns right away; the result comes as an event.
     pub fn save_replay(&self) -> Result<(), String> {
+        // The moment of the key press, before anything that could wait on a lock.
+        let pressed = now_hns();
         let cfg = self.s.cfg.lock().unwrap().clone();
         if self.s.run.lock().unwrap().is_none() {
             return Err(if !cfg.enabled {
@@ -795,7 +797,6 @@ impl Engine {
         if self.s.ring.lock().unwrap().newest_hns().is_none() {
             return Err("Nothing recorded yet — try again in a second.".into());
         }
-        let pressed = now_hns();
         let me = self.clone();
         std::thread::spawn(move || {
             // The buffer can run behind the game when the PC can't encode fast
@@ -810,6 +811,8 @@ impl Engine {
                 }
                 std::thread::sleep(Duration::from_millis(40));
             };
+            #[cfg(debug_assertions)]
+            println!("[clip] waited {:?}, buffer {:.0} ms behind the key", Duration::from_millis(MAX_CATCH_UP_MS).saturating_sub(deadline.saturating_duration_since(Instant::now())), behind as f64 / 1e4);
             if behind > CAUGHT_UP_HNS && !me.s.warned_lag.swap(true, Ordering::SeqCst) {
                 (me.s.events)(Event::Warning(format!(
                     "Your PC is recording about {:.0} s behind the game, so clips end a bit early. Lower the quality, frame rate or resolution in Settings → Recording.",
@@ -874,7 +877,11 @@ impl Engine {
         let shared = self.s.clone();
         std::thread::spawn(move || {
             // The clip is saved right away, as without a hand cam.
+            #[cfg(debug_assertions)]
+            let t0 = Instant::now();
             let res = mux::save_clip(&ffmpeg, &snap, pcm, &opts, fps, &out, &|c| shared.job.add(c));
+            #[cfg(debug_assertions)]
+            println!("[clip] ffmpeg wrote the clip in {:?}", t0.elapsed());
             drop(snap);
             let saved = res.is_ok();
             (shared.events)(match res {
@@ -1561,8 +1568,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("clipit-rp-{}", std::process::id()));
         let mut cfg = Capture::default();
         cfg.target = "monitor".into();
-        cfg.desktop_audio = false;
-        cfg.mic = false;
+        // CLIPIT_AUDIO=1: with desktop + mic audio on separate tracks.
+        let audio = std::env::var("CLIPIT_AUDIO").is_ok();
+        cfg.desktop_audio = audio;
+        cfg.mic = audio;
+        cfg.separate_tracks = audio;
         cfg.sounds = false;
         cfg.auto_clip_kills = false;
         cfg.count_kills = false;
