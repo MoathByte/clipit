@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.1
+
+- **Hand cam is now live, like a camera source in OBS**: the camera is drawn onto the game while it records, so saving
+  a clip is instant again (no more waiting while the clip was re-encoded) and clips are their normal size again.
+- **Better sync**: the camera and the game share one clock as they're recorded. If your camera is still ahead,
+  **Delay camera** holds it back.
+- **Live preview**: Settings → Hand cam shows the camera live, exactly as it will look in clips (shape, border,
+  turn, zoom and adjustments).
+- With the hand cam on, recording uses a little more CPU (under one core); with it off nothing changes.
+
 ## 0.12.0
 
 - **Hand cam**: add a camera (a webcam, or your phone through an app like Iriun Webcam) to your clips. Pick the camera,

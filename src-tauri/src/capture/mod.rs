@@ -14,6 +14,7 @@ pub mod audio;
 pub mod encoder;
 pub mod game;
 pub mod handcam;
+pub mod camfeed;
 pub mod killfeed;
 pub mod valorant;
 pub mod mux;
@@ -83,8 +84,6 @@ pub enum Event {
     /// What a saved VALORANT clip shows: your kills, the map and your agent.
     ClipInfo { path: PathBuf, info: valorant::ClipInfo },
     ClipFailed(String),
-    /// Saved, but something extra didn't work (e.g. the hand cam).
-    Warning(String),
     RecordingStarted(PathBuf),
     RecordingStopped { path: PathBuf, size: u64 },
     RecordingFailed(String),
@@ -94,7 +93,9 @@ pub enum Event {
 
 /// Fields that require restarting the capture pipeline when they change.
 fn pipeline_key(c: &Capture) -> String {
-    format!(
+    let h = &c.handcam;
+    let cam = if h.enabled && !h.device.trim().is_empty() { format!("{:.3}|{:.3}|{:.3}|{}|{}", h.x, h.y, h.size, h.aspect, h.shape == "circle") } else { "off".into() };
+    cam + "|" + &format!(
         "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         c.resolution, c.fps, c.quality, c.codec, c.encoder, c.cursor, c.target, c.monitor, c.desktop_audio, c.desktop_device, c.mic, c.mic_device, c.auto_clip_kills
     )
@@ -114,17 +115,9 @@ struct Running {
     audio_threads: Vec<JoinHandle<()>>,
     /// Killfeed tap pipe + the thread reading it (VALORANT kill clips).
     tap: Option<(String, JoinHandle<()>)>,
-    /// Size of the recorded frames.
-    size: (u32, u32),
-}
-
-/// The hand cam's ffmpeg (camera -> its own RAM buffer).
-struct CamRun {
-    key: String,
-    device: String,
-    child: Child,
-    reader: Option<JoinHandle<()>>,
-    stderr: Arc<Mutex<String>>,
+    /// Hand cam drawn onto the game, and the thread feeding it.
+    cam: Option<camfeed::Overlay>,
+    cam_writer: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
 }
 
 struct Recording {
@@ -137,8 +130,6 @@ struct Recording {
     pipe_name: Option<String>,
     mux: Option<mux::LiveMux>,
     failed: Arc<AtomicBool>,
-    /// Hand cam for this recording: its file + QPC time of its first frame.
-    cam: Option<(PathBuf, Arc<AtomicI64>)>,
 }
 
 struct Shared {
@@ -158,14 +149,15 @@ struct Shared {
     run: Mutex<Option<Running>>,
     recording: Mutex<Option<Recording>>,
     want_record: AtomicBool,
-    cam: Mutex<Option<CamRun>>,
-    cam_ring: Mutex<ts::Ring>,
+    /// Hand cam: the camera process and its latest frames.
+    cam: Mutex<Option<camfeed::CamProc>>,
+    feed: Arc<camfeed::Feed>,
     /// Last hand cam failure (shown in Settings) and when to try again.
     cam_error: Mutex<(String, Instant)>,
     /// The camera is lent to its settings window: don't record it meanwhile.
     cam_hold: AtomicBool,
-    /// Last preview picture (device, JPEG), so adjustments preview instantly.
-    preview: Mutex<Option<(String, Vec<u8>)>>,
+    /// Settings preview: the hand cam settings being edited, until when.
+    preview: Mutex<Option<(crate::config::HandCam, Instant)>>,
     status: Mutex<Status>,
     job: Job,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -195,7 +187,7 @@ impl Engine {
             recording: Mutex::new(None),
             want_record: AtomicBool::new(false),
             cam: Mutex::new(None),
-            cam_ring: Mutex::new(ts::Ring::new(333_333)),
+            feed: camfeed::Feed::new(),
             cam_error: Mutex::new((String::new(), Instant::now())),
             cam_hold: AtomicBool::new(false),
             preview: Mutex::new(None),
@@ -237,36 +229,53 @@ impl Engine {
             stop_running(r);
         }
         if let Some(c) = self.s.cam.lock().unwrap().take() {
-            stop_cam(c);
+            c.stop();
         }
     }
 
     // ---------- hand cam ----------
 
-    /// Starts, restarts or stops the camera: on only while the game is captured.
+    /// Runs the camera process when something needs it: the capture (which draws
+    /// it onto the game) or the settings preview. Both share its frames.
     fn sync_cam(&self, ffmpeg: &Path, cfg: &Capture) {
-        let hc = &cfg.handcam;
-        let want = hc.enabled && !hc.device.trim().is_empty() && self.s.run.lock().unwrap().is_some() && !self.s.cam_hold.load(Ordering::SeqCst);
-        let key = handcam::key(hc);
+        let preview = self.s.preview.lock().unwrap().clone().filter(|(_, until)| Instant::now() < *until).map(|(h, _)| h);
+        let capture = self.s.run.lock().unwrap().as_ref().and_then(|r| r.cam.as_ref().map(|o| (o.size, o.fps)));
+        let even = |v: f64| ((v / 2.0).round() as u32) * 2;
+        // The capture's size when it shows the camera; else a small preview picture.
+        // While you edit settings the preview's look (shape, colours…) is used live.
+        let previewing = preview.is_some();
+        let (hc, size, fps) = match (capture, preview) {
+            (Some((size, fps)), p) => (p.unwrap_or_else(|| cfg.handcam.clone()), size, fps),
+            (None, Some(p)) => {
+                let a = handcam::aspect(&p);
+                let size = (480, even(480.0 / a).max(16));
+                (p, size, 30)
+            }
+            _ => (cfg.handcam.clone(), (0, 0), 0),
+        };
+        let hold = self.s.cam_hold.load(Ordering::SeqCst);
+        let want = size.0 > 0 && !hc.device.trim().is_empty() && !hold;
+        self.s.feed.delay_ms.store(hc.delay_ms.clamp(0, 2000), Ordering::Relaxed);
+        let key = camfeed::key(&hc, size, fps);
         let mut cam = self.s.cam.lock().unwrap();
         // Died (unplugged, used by another app)?
-        let died = cam.as_mut().is_some_and(|c| matches!(c.child.try_wait(), Ok(Some(_))));
+        let died = cam.as_mut().is_some_and(|c| c.exited());
         if died {
             let c = cam.take().unwrap();
             let err = c.stderr.lock().unwrap().trim().lines().last().unwrap_or("").to_string();
-            stop_cam(c);
+            c.stop();
             let msg = if err.is_empty() || err.contains("Could not") || err.contains("I/O error") {
                 "The camera isn't connected or is in use by another app.".to_string()
             } else {
                 err
             };
-            *self.s.cam_error.lock().unwrap() = (msg, Instant::now() + Duration::from_secs(10));
+            *self.s.cam_error.lock().unwrap() = (msg, Instant::now() + Duration::from_secs(5));
         }
         if cam.as_ref().is_some_and(|c| !want || c.key != key) {
-            stop_cam(cam.take().unwrap());
+            cam.take().unwrap().stop();
         }
         if !want {
-            if !hc.enabled {
+            if !hc.enabled && !previewing {
                 self.s.cam_error.lock().unwrap().0.clear();
             }
             return;
@@ -274,102 +283,25 @@ impl Engine {
         if cam.is_some() || Instant::now() < self.s.cam_error.lock().unwrap().1 {
             return;
         }
-        match self.start_cam(ffmpeg, hc, key) {
+        match camfeed::CamProc::start(ffmpeg, &hc, size, fps, self.s.feed.clone(), &|c| self.s.job.add(c)) {
             Ok(c) => {
                 *cam = Some(c);
                 self.s.cam_error.lock().unwrap().0.clear();
             }
-            Err(e) => *self.s.cam_error.lock().unwrap() = (e, Instant::now() + Duration::from_secs(10)),
+            Err(e) => *self.s.cam_error.lock().unwrap() = (e, Instant::now() + Duration::from_secs(5)),
         }
     }
 
-    fn start_cam(&self, ffmpeg: &Path, hc: &crate::config::HandCam, key: String) -> Result<CamRun, String> {
-        let enc = encoder::pick(&self.encoders(), "h264", "auto").unwrap_or_else(|| "libx264".into());
-        let mut cmd = Command::new(ffmpeg);
-        cmd.args(handcam::camera_args(hc, &enc)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        #[cfg(windows)]
-        cmd.creation_flags(encoder::CREATE_NO_WINDOW);
-        let mut child = cmd.spawn().map_err(|e| format!("Couldn't start ffmpeg: {e}"))?;
-        self.s.job.add(&child);
-        let fps: i64 = if hc.fps >= 60 { 60 } else { 30 };
-        *self.s.cam_ring.lock().unwrap() = ts::Ring::new(10_000_000 / fps);
-        let mut stdout = child.stdout.take().unwrap();
-        let shared = self.s.clone();
-        let per_sec = encoder::buffer_bytes(handcam::kbps(hc) * 3 / 2, 1) as usize;
-        let reader = std::thread::Builder::new()
-            .name("handcam-reader".into())
-            .spawn(move || {
-                let mut buf = vec![0u8; 64 * 1024];
-                while let Ok(n) = stdout.read(&mut buf) {
-                    if n == 0 {
-                        break;
-                    }
-                    // As long as the game's buffer, plus a little.
-                    let keep = shared.keep_secs.load(Ordering::SeqCst).max(shared.kill_keep.load(Ordering::SeqCst)) as f64 + 3.0;
-                    let mut ring = shared.cam_ring.lock().unwrap();
-                    ring.feed(&buf[..n], now_hns());
-                    ring.trim(keep, per_sec * (keep as usize + 2));
-                }
-            })
-            .map_err(|e| e.to_string())?;
-        let stderr = Arc::new(Mutex::new(String::new()));
-        let mut err = child.stderr.take().unwrap();
-        let sb = stderr.clone();
-        std::thread::spawn(move || {
-            let mut chunk = [0u8; 2048];
-            while let Ok(n) = err.read(&mut chunk) {
-                if n == 0 {
-                    break;
-                }
-                let mut s = sb.lock().unwrap();
-                s.push_str(&String::from_utf8_lossy(&chunk[..n]));
-                if s.len() > 4096 {
-                    let cut = (s.len() - 2048..s.len()).find(|&i| s.is_char_boundary(i)).unwrap_or(s.len());
-                    s.drain(..cut);
-                }
-            }
-        });
-        Ok(CamRun { key, device: hc.device.clone(), child, reader: Some(reader), stderr })
-    }
-
-    /// Is the camera being recorded (and has some picture)?
-    fn cam_live(&self) -> bool {
-        let on = self.s.cfg.lock().unwrap().handcam.enabled;
-        on && self.s.cam.lock().unwrap().is_some() && self.s.cam_ring.lock().unwrap().header().is_some()
-    }
-
-    /// A still from `device` for the settings preview: from the running camera if
-    /// it's that one (a camera can only be opened once), else straight from it.
-    pub fn camera_frame(&self, device: &str) -> Result<Vec<u8>, String> {
-        let ffmpeg = self.s.ffmpeg.clone().or_else(|| crate::media::find_ffmpeg().map(|f| f.path)).ok_or("ffmpeg isn't installed")?;
-        let running = self.s.cam.lock().unwrap().as_ref().is_some_and(|c| c.device == device);
-        if running {
-            let snap = self.s.cam_ring.lock().unwrap().snapshot(0.5);
-            if let Some(snap) = snap {
-                let mut ts = snap.header.clone();
-                for c in &snap.bytes {
-                    ts.extend_from_slice(c);
-                }
-                return handcam::frame_from_ts(&ffmpeg, ts);
-            }
+    /// Live preview for the settings: the camera as it will look, with `hc` (the
+    /// settings being edited). Keeps the camera on for a few seconds per call.
+    /// None = no picture yet.
+    pub fn handcam_preview(&self, hc: crate::config::HandCam) -> Result<Option<Vec<u8>>, String> {
+        *self.s.preview.lock().unwrap() = Some((hc, Instant::now() + Duration::from_secs(3)));
+        if let Some(png) = self.s.feed.preview_png(480).filter(|_| self.s.feed.live()) {
+            return Ok(Some(png));
         }
-        handcam::grab_frame(&ffmpeg, device)
-    }
-
-    /// Preview picture with the adjustments in `hc` applied. `fresh` takes a new
-    /// picture from the camera; otherwise the last one is reused (instant).
-    pub fn camera_preview(&self, hc: &crate::config::HandCam, fresh: bool) -> Result<Vec<u8>, String> {
-        let ffmpeg = self.s.ffmpeg.clone().or_else(|| crate::media::find_ffmpeg().map(|f| f.path)).ok_or("ffmpeg isn't installed")?;
-        let cached = self.s.preview.lock().unwrap().clone().filter(|(d, _)| !fresh && *d == hc.device);
-        let raw = match cached {
-            Some((_, jpeg)) => jpeg,
-            None => {
-                let jpeg = self.camera_frame(&hc.device)?;
-                *self.s.preview.lock().unwrap() = Some((hc.device.clone(), jpeg.clone()));
-                jpeg
-            }
-        };
-        handcam::adjust_jpeg(&ffmpeg, &raw, hc)
+        let err = self.s.cam_error.lock().unwrap().0.clone();
+        if err.is_empty() { Ok(None) } else { Err(err) }
     }
 
     /// Opens the camera's own settings window. The camera is released while it's
@@ -378,11 +310,10 @@ impl Engine {
         let ffmpeg = self.s.ffmpeg.clone().or_else(|| crate::media::find_ffmpeg().map(|f| f.path)).ok_or("ffmpeg isn't installed")?;
         self.s.cam_hold.store(true, Ordering::SeqCst);
         if let Some(c) = self.s.cam.lock().unwrap().take() {
-            stop_cam(c);
+            c.stop();
         }
         let res = handcam::settings_dialog(&ffmpeg, device);
         self.s.cam_hold.store(false, Ordering::SeqCst);
-        *self.s.preview.lock().unwrap() = None; // the picture changed
         res
     }
 
@@ -392,46 +323,6 @@ impl Engine {
             None => Vec::new(),
         }
     }
-
-    /// The camera for a clip's time range, written as MPEG-TS to `file`.
-    /// Returns the QPC time of its first frame.
-    fn cam_for_range(&self, start_hns: i64, end_hns: i64, file: &Path) -> Option<i64> {
-        let snap = self.s.cam_ring.lock().unwrap().snapshot_range(start_hns - 10_000_000, end_hns)?;
-        std::fs::create_dir_all(file.parent()?).ok()?;
-        let mut f = std::io::BufWriter::new(std::fs::File::create(file).ok()?);
-        f.write_all(&snap.header).ok()?;
-        for c in &snap.bytes {
-            f.write_all(c).ok()?;
-        }
-        f.flush().ok()?;
-        Some(snap.start_hns())
-    }
-
-    /// While recording, the camera is also written to a file (from its next keyframe).
-    fn start_cam_recording(&self) -> Option<(PathBuf, Arc<AtomicI64>)> {
-        let file = self.s.data_dir.join("handcam").join(format!("rec-{}.ts", unique_id()));
-        std::fs::create_dir_all(file.parent()?).ok()?;
-        let mut ring = self.s.cam_ring.lock().unwrap();
-        let header = ring.header()?;
-        let offset = ring.offset_hns()?;
-        let mut w = std::io::BufWriter::new(std::fs::File::create(&file).ok()?);
-        w.write_all(&header).ok()?;
-        let start = Arc::new(AtomicI64::new(0));
-        let first = start.clone();
-        let mut started = false;
-        ring.tee = Some(Box::new(move |p: &[u8], keyframe: bool, pts: Option<i64>| {
-            if !started {
-                if !keyframe {
-                    return;
-                }
-                started = true;
-                first.store(ts::pts_to_hns(pts.unwrap_or(0)) + offset, Ordering::SeqCst);
-            }
-            let _ = w.write_all(p);
-        }));
-        Some((file, start))
-    }
-
 
     // ---------- supervisor ----------
 
@@ -540,9 +431,9 @@ impl Engine {
                     encoder: friendly_encoder(&r.plan.encoder),
                     detail,
                     buffered_secs: secs.min(cfg.replay_secs as f64),
-                    ram_bytes: (ram + self.s.cam_ring.lock().unwrap().bytes()) as u64,
+                    ram_bytes: ram as u64,
                     recording: rec,
-                    handcam_on: self.s.cam.lock().unwrap().is_some(),
+                    handcam_on: r.cam.is_some() && self.s.feed.live(),
                     handcam_error: self.s.cam_error.lock().unwrap().0.clone(),
                 };
                 drop(run);
@@ -611,7 +502,14 @@ impl Engine {
                 _ => false,
             };
         let tap_pipe = if watch_kills { mux::Pipe::new_inbound().ok() } else { None };
-        let args = encoder::args(&source, &plan, cfg.cursor, tap_pipe.as_ref().map(|p| p.name.as_str()));
+        // Hand cam: the camera is drawn onto the game while recording (like OBS).
+        let size = if plan.width > 0 { (plan.width, plan.height) } else { (w, h) };
+        let cam_pipe = if cfg.handcam.enabled && !cfg.handcam.device.trim().is_empty() { mux::Pipe::new().ok() } else { None };
+        let cam = cam_pipe.as_ref().map(|p| {
+            let (x, y, cw, ch) = handcam::layout(&cfg.handcam, size.0, size.1);
+            camfeed::Overlay { pipe: p.name.clone(), size: (cw, ch), at: (x, y), fps: plan.fps.min(60) }
+        });
+        let args = encoder::args(&source, &plan, cfg.cursor, tap_pipe.as_ref().map(|p| p.name.as_str()), cam.as_ref());
         #[cfg(debug_assertions)]
         println!("[capture] ffmpeg {}", args.join(" "));
 
@@ -621,6 +519,15 @@ impl Engine {
         cmd.creation_flags(encoder::CREATE_NO_WINDOW);
         let mut child = cmd.spawn().map_err(|e| format!("Couldn't start ffmpeg: {e}"))?;
         self.s.job.add(&child);
+        let cam_writer = cam_pipe.zip(cam.as_ref()).map(|(pipe, o)| {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (feed, size, fps, st) = (self.s.feed.clone(), o.size, o.fps, stop.clone());
+            let t = std::thread::Builder::new()
+                .name("handcam-writer".into())
+                .spawn(move || camfeed::write_loop(feed, pipe, size, fps, st))
+                .expect("handcam writer thread");
+            (stop, t)
+        });
 
         *self.s.ring.lock().unwrap() = ts::Ring::new(10_000_000 / plan.fps as i64);
         // While watching for kills the buffer must hold a whole highlight until the
@@ -692,8 +599,7 @@ impl Engine {
                 .expect("killfeed thread");
             (name, t)
         });
-        let size = if plan.width > 0 { (plan.width, plan.height) } else { (w, h) };
-        Ok(Running { source, game, label, plan, key, child, reader: Some(reader), stderr: stderr_buf, audio_stop, audio_threads, tap, size })
+        Ok(Running { source, game, label, plan, key, child, reader: Some(reader), stderr: stderr_buf, audio_stop, audio_threads, tap, cam, cam_writer })
     }
 
     fn set_status(&self, state: &str, message: &str, rec: Option<RecordingStatus>) {
@@ -768,8 +674,7 @@ impl Engine {
     fn save_snapshot(&self, snap: ts::Snapshot, kills: Option<u32>) -> Result<(), String> {
         let cfg = self.s.cfg.lock().unwrap().clone();
         let ffmpeg = self.s.ffmpeg.clone().ok_or("ffmpeg isn't installed")?;
-        let video = self.s.run.lock().unwrap().as_ref().map(|r| VideoInfo::of(r)).ok_or("Capture isn't running.")?;
-        let fps = video.fps;
+        let fps = self.s.run.lock().unwrap().as_ref().map(|r| r.plan.fps).ok_or("Capture isn't running.")?;
         let (start, end) = (snap.start_hns() + AUDIO_SHIFT_HNS, snap.end_hns() + AUDIO_SHIFT_HNS);
         let opts = Self::audio_opts(&cfg);
         let d = opts.desktop.then(|| self.s.desktop.lock().unwrap().read(start, end));
@@ -779,41 +684,18 @@ impl Engine {
         let root = self.s.clips_root.lock().unwrap().clone();
         let out = clip_path(Path::new(&root), &name, ".mp4")?;
         let analyze = killfeed::is_valorant(&name) && (cfg.count_kills || kills.is_some());
-        // Hand cam: the camera for the same time, kept aside until the clip is written.
-        let game_start = snap.start_hns();
-        let cam = if self.cam_live() {
-            let file = self.s.data_dir.join("handcam").join(format!("cam-{}.ts", unique_id()));
-            self.cam_for_range(snap.start_hns(), snap.end_hns(), &file).map(|t| (file, t))
-        } else {
-            None
-        };
         let shared = self.s.clone();
         std::thread::spawn(move || {
-            // With a hand cam the plain clip is written first, then the camera added.
-            let raw = if cam.is_some() { raw_path(&out) } else { out.clone() };
-            let res = mux::save_clip(&ffmpeg, &snap, pcm, &opts, fps, &raw, &|c| shared.job.add(c));
+            let res = mux::save_clip(&ffmpeg, &snap, pcm, &opts, fps, &out, &|c| shared.job.add(c));
             drop(snap);
-            let res = match (res, &cam) {
-                (Ok(size), Some((file, cam_start))) => Ok(add_handcam(&shared, &ffmpeg, &cfg.handcam, &video, &raw, &out, file, cam_start - game_start).unwrap_or(size)),
-                (r, _) => r,
-            };
-            if let Some((file, _)) = &cam {
-                let _ = std::fs::remove_file(file);
-            }
             let saved = res.is_ok();
             (shared.events)(match res {
                 Ok(size) => Event::ClipSaved { path: out.clone(), size, kills },
                 Err(e) => Event::ClipFailed(e),
             });
-            // Kills, map and agent are read from the clip without the camera on it.
-            let read_from = if raw.exists() { raw.clone() } else { out.clone() };
             if saved && analyze {
-                let mut info = valorant::analyze_clip(&ffmpeg, &read_from, &shared.data_dir.join("valorant"), kills, &|c| shared.job.add(c));
-                info.auto = false;
-                (shared.events)(Event::ClipInfo { path: out.clone(), info });
-            }
-            if raw != out {
-                let _ = std::fs::remove_file(&raw);
+                let info = valorant::analyze_clip(&ffmpeg, &out, &shared.data_dir.join("valorant"), kills, &|c| shared.job.add(c));
+                (shared.events)(Event::ClipInfo { path: out, info });
             }
         });
         Ok(())
@@ -969,7 +851,6 @@ impl Engine {
         let out = clip_path(Path::new(&root), &name, ".mp4")?;
         let opts = Self::audio_opts(&cfg);
         let shared = self.s.clone();
-        let cam = if self.cam_live() { self.start_cam_recording() } else { None };
         let mut live = mux::start_live(&ffmpeg, &opts, &out, &|c| shared.job.add(c))?;
         let header = self.s.ring.lock().unwrap().header().unwrap_or_default();
 
@@ -1047,7 +928,7 @@ impl Engine {
             })
         });
 
-        *self.s.recording.lock().unwrap() = Some(Recording { path: out.clone(), start_hns, stop, video: Some(video), audio, pipe_name, mux: Some(live), failed, cam });
+        *self.s.recording.lock().unwrap() = Some(Recording { path: out.clone(), start_hns, stop, video: Some(video), audio, pipe_name, mux: Some(live), failed });
         if cfg.sounds {
             sound::play(sound::Cue::RecordStart);
         }
@@ -1063,7 +944,6 @@ impl Engine {
         self.s.want_record.store(false, Ordering::SeqCst);
         // Stop feeding video (dropping the tee closes the channel → writer exits).
         self.s.ring.lock().unwrap().tee = None;
-        self.s.cam_ring.lock().unwrap().tee = None; // closes the hand cam file
         if let Some(v) = rec.video.take() {
             let _ = v.join();
         }
@@ -1084,23 +964,7 @@ impl Engine {
         let sounds = self.s.cfg.lock().unwrap().sounds;
         let path = rec.path.clone();
         let failed = rec.failed.load(Ordering::SeqCst);
-        let mut result = rec.mux.take().map(|m| m.finish()).unwrap_or(Err("no muxer".into()));
-        // Hand cam: add the camera now that the recording is complete.
-        if let (Ok(size), Some((file, cam_start))) = (&result, &rec.cam) {
-            let (cam_start, rec_start) = (cam_start.load(Ordering::SeqCst), rec.start_hns.load(Ordering::SeqCst));
-            let video = self.s.run.lock().unwrap().as_ref().map(VideoInfo::of);
-            if let (Some(ffmpeg), Some(video), true) = (self.s.ffmpeg.clone(), video, cam_start > 0 && rec_start > 0) {
-                let raw = raw_path(&path);
-                if std::fs::rename(&path, &raw).is_ok() {
-                    let hc = self.s.cfg.lock().unwrap().handcam.clone();
-                    result = Ok(add_handcam(&self.s, &ffmpeg, &hc, &video, &raw, &path, file, cam_start - rec_start).unwrap_or(*size));
-                    let _ = std::fs::remove_file(&raw);
-                }
-            }
-        }
-        if let Some((file, _)) = &rec.cam {
-            let _ = std::fs::remove_file(file);
-        }
+        let result = rec.mux.take().map(|m| m.finish()).unwrap_or(Err("no muxer".into()));
         if sounds {
             sound::play(if result.is_ok() { sound::Cue::RecordStop } else { sound::Cue::Error });
         }
@@ -1150,76 +1014,17 @@ impl Drop for Tee {
     }
 }
 
-/// What the saved video looks like (for re-encoding it with the hand cam).
-#[derive(Clone)]
-struct VideoInfo {
-    size: (u32, u32),
-    encoder: String,
-    kbps: u32,
-    max_kbps: u32,
-    fps: u32,
-}
-
-impl VideoInfo {
-    fn of(r: &Running) -> Self {
-        Self { size: r.size, encoder: r.plan.encoder.clone(), kbps: r.plan.kbps, max_kbps: r.plan.max_kbps, fps: r.plan.fps }
-    }
-}
-
-fn unique_id() -> String {
-    let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    format!("{}-{ns}", std::process::id())
-}
-
-/// The clip before the hand cam is added: next to it, with an extension the
-/// library ignores.
-fn raw_path(out: &Path) -> PathBuf {
-    let mut s = out.as_os_str().to_owned();
-    s.push(".clipit-raw");
-    PathBuf::from(s)
-}
-
-/// `raw` + camera -> `out`. On failure `raw` becomes `out` (the clip is kept
-/// without the camera) and a warning is shown. `cam_offset_hns` = camera start
-/// minus clip start.
-fn add_handcam(shared: &Shared, ffmpeg: &Path, hc: &crate::config::HandCam, v: &VideoInfo, raw: &Path, out: &Path, cam_file: &Path, cam_offset_hns: i64) -> Result<u64, String> {
-    let work = shared.data_dir.join("handcam");
-    let c = handcam::Compose {
-        ffmpeg,
-        game: raw,
-        camera: cam_file,
-        camera_offset: cam_offset_hns as f64 / 1e7 + hc.delay_ms as f64 / 1000.0,
-        cam: hc,
-        size: v.size,
-        encoder: &v.encoder,
-        kbps: v.kbps,
-        max_kbps: v.max_kbps,
-        fps: v.fps,
-        work: &work,
-        out,
-    };
-    match handcam::compose(&c, &|ch| shared.job.add(ch)) {
-        Ok(n) => Ok(n),
-        Err(e) => {
-            let _ = std::fs::rename(raw, out);
-            (shared.events)(Event::Warning(format!("Saved without the hand cam. {e}")));
-            Err(e)
-        }
-    }
-}
-
-fn stop_cam(mut c: CamRun) {
-    let _ = c.child.kill();
-    let _ = c.child.wait();
-    if let Some(t) = c.reader.take() {
-        let _ = t.join();
-    }
-}
-
 fn stop_running(mut r: Running) {
     r.audio_stop.store(true, Ordering::SeqCst);
     let _ = r.child.kill();
     let _ = r.child.wait();
+    if let Some((stop, t)) = r.cam_writer.take() {
+        stop.store(true, Ordering::SeqCst);
+        if let Some(o) = &r.cam {
+            mux::Pipe::poke(&o.pipe); // in case ffmpeg never opened it
+        }
+        let _ = t.join();
+    }
     if let Some(t) = r.reader.take() {
         let _ = t.join();
     }
@@ -1386,7 +1191,7 @@ mod tests {
         let mon = game::monitors().into_iter().next().expect("a monitor");
         let plan = encoder::plan(&Capture::default(), mon.width as u32, mon.height as u32, enc);
         let pipe = mux::Pipe::new_inbound().unwrap();
-        let mut args = encoder::args(&Source::Monitor(mon.handle), &plan, false, Some(&pipe.name));
+        let mut args = encoder::args(&Source::Monitor(mon.handle), &plan, false, Some(&pipe.name), None);
         args.splice(0..0, ["-t".to_string(), "4".to_string()]);
         let mut child = Command::new("ffmpeg").args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let mut out = child.stdout.take().unwrap();
@@ -1432,7 +1237,7 @@ mod tests {
             let msg = match ev {
                 Event::ClipSaved { path, size, .. } => format!("saved {} {size}", path.display()),
                 Event::RecordingStopped { path, size } => format!("saved {} {size}", path.display()),
-                Event::Warning(w) | Event::ClipFailed(w) | Event::RecordingFailed(w) => format!("problem {w}"),
+                Event::ClipFailed(w) | Event::RecordingFailed(w) => format!("problem {w}"),
                 _ => return,
             };
             let _ = tx.lock().unwrap().send(msg);
@@ -1440,11 +1245,15 @@ mod tests {
         let t = Instant::now();
         while !(engine.status().handcam_on && engine.status().buffered_secs > 6.0) {
             assert!(t.elapsed() < Duration::from_secs(30), "capture + camera didn't start: {:?}", engine.status());
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_millis(1000));
+            let st = engine.status();
+            println!("{:>5.1}s state={} buffered={:.1} ram={} cam={}", t.elapsed().as_secs_f64(), st.state, st.buffered_secs, st.ram_bytes, st.handcam_on);
         }
+        println!("status: {:?}", engine.status());
+        let t = Instant::now();
         engine.save_replay().unwrap();
         let saved = rx.recv_timeout(Duration::from_secs(60)).unwrap();
-        println!("replay: {saved} ({:?})", t.elapsed());
+        println!("replay: {saved} (saved in {:?})", t.elapsed());
         assert!(saved.starts_with("saved"), "{saved}");
         engine.toggle_recording().unwrap();
         std::thread::sleep(Duration::from_secs(4));

@@ -565,9 +565,6 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
             let _ = app.emit("clip-info", serde_json::json!({ "path": path, "info": merged }));
         }
         Event::ClipFailed(e) => capture_error(app, &cfg_now, &format!("Couldn't save the clip: {e}")),
-        Event::Warning(m) => {
-            let _ = app.emit("capture-error", m);
-        }
         Event::RecordingStarted(path) => {
             set_tray_tooltip(app, "Clipit \u{2014} \u{25CF} recording");
             let _ = app.emit("recording", serde_json::json!({ "active": true, "path": path }));
@@ -926,13 +923,13 @@ async fn list_cameras(state: State<'_, AppState>) -> Result<Vec<String>, String>
     tauri::async_runtime::spawn_blocking(move || engine.cameras()).await.map_err(|e| e.to_string())
 }
 
-/// A still from the hand cam with its picture adjustments, as a data: URL.
-/// `fresh` = take a new picture (else the last one is adjusted again).
+/// Live hand cam preview for the settings (`handcam` = the settings being edited),
+/// as a data: URL; None until the camera has a picture.
 #[tauri::command]
-async fn camera_preview(state: State<'_, AppState>, handcam: config::HandCam, fresh: bool) -> Result<String, String> {
+async fn handcam_preview(state: State<'_, AppState>, handcam: config::HandCam) -> Result<Option<String>, String> {
     let engine = state.engine.clone();
-    let jpeg = tauri::async_runtime::spawn_blocking(move || engine.camera_preview(&handcam, fresh)).await.map_err(|e| e.to_string())??;
-    Ok(format!("data:image/jpeg;base64,{}", capture::handcam::base64(&jpeg)))
+    let png = tauri::async_runtime::spawn_blocking(move || engine.handcam_preview(handcam)).await.map_err(|e| e.to_string())??;
+    Ok(png.map(|p| format!("data:image/png;base64,{}", capture::handcam::base64(&p))))
 }
 
 /// The camera's own settings window (exposure, white balance, focus…).
@@ -1461,7 +1458,7 @@ fn main() {
             analyze_clip,
             read_kill_times,
             list_cameras,
-            camera_preview,
+            handcam_preview,
             camera_settings,
             open_app_window,
             set_window_theme,

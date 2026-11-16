@@ -152,7 +152,8 @@ pub fn encode_args(e: &str, kbps: u32, max_kbps: u32, gop: u32) -> Vec<String> {
     enc.iter().map(|s| s.to_string()).collect()
 }
 
-pub fn args(source: &Source, plan: &Plan, cursor: bool, tap: Option<&str>) -> Vec<String> {
+/// `cam`: overlay the hand cam (RGBA frames from a pipe) onto the game while recording.
+pub fn args(source: &Source, plan: &Plan, cursor: bool, tap: Option<&str>, cam: Option<&super::camfeed::Overlay>) -> Vec<String> {
     let mut src = match source {
         Source::Window(h) => format!("gfxcapture=hwnd={}", *h as u64),
         Source::Monitor(m) => format!("gfxcapture=hmonitor={}", *m as u64),
@@ -174,15 +175,34 @@ pub fn args(source: &Source, plan: &Plan, cursor: bool, tap: Option<&str>) -> Ve
             h = TAP_H
         ));
     }
-    if !zero_copy(e) {
-        src.push_str(if e == "libx264" || e == "libx265" { ",hwdownload,format=bgra,format=yuv420p" } else { ",hwdownload,format=bgra,format=nv12" });
+    let cpu = e == "libx264" || e == "libx265";
+    if let Some(c) = cam {
+        // Hand cam: the game comes off the GPU (the camera can't be drawn onto GPU
+        // frames here) and both are put on one clock — arrival time — so the camera
+        // matches the game. The camera's frames are stamped a frame and a half ahead,
+        // so the overlay never waits for one.
+        let ahead = 1_500_000 / c.fps.max(1) as i64;
+        src.push_str(&format!(
+            ",hwdownload,format=bgra,format=nv12,settb=AVTB,setpts=RTCTIME-RTCSTART[game];[0:v]settb=AVTB,setpts=RTCTIME-RTCSTART+{ahead}[cam];[game][cam]overlay={x}:{y}:format=yuv420{fmt}",
+            x = c.at.0,
+            y = c.at.1,
+            fmt = if cpu { "" } else { ",format=nv12" }
+        ));
+    } else if !zero_copy(e) {
+        src.push_str(if cpu { ",hwdownload,format=bgra,format=yuv420p" } else { ",hwdownload,format=bgra,format=nv12" });
     }
-    if tap.is_some() {
+    if tap.is_some() || cam.is_some() {
         src.push_str("[vid]");
     }
 
-    let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-filter_complex", &src].iter().map(|s| s.to_string()).collect();
-    if tap.is_some() {
+    let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin"].iter().map(|s| s.to_string()).collect();
+    if let Some(c) = cam {
+        let size = format!("{}x{}", c.size.0, c.size.1);
+        let rate = c.fps.to_string();
+        a.extend(["-f", "rawvideo", "-pix_fmt", "rgba", "-video_size", &size, "-framerate", &rate, "-thread_queue_size", "16", "-i", &c.pipe].iter().map(|s| s.to_string()));
+    }
+    a.extend(["-filter_complex".to_string(), src.clone()]);
+    if tap.is_some() || cam.is_some() {
         a.extend(["-map".to_string(), "[vid]".to_string()]);
     }
     // A keyframe every second: clips start within 1 s of where you asked.
@@ -239,21 +259,34 @@ mod tests {
         let cfg = Capture::default();
         let p = plan(&cfg, 2560, 1440, "h264_nvenc");
         assert_eq!((p.width, p.height, p.fps, p.kbps), (1920, 1080, 60, 20000));
-        let a = args(&Source::Monitor(65537), &p, false, None).join(" ");
+        let a = args(&Source::Monitor(65537), &p, false, None, None).join(" ");
         assert!(a.contains("gfxcapture=hmonitor=65537:max_framerate=60:capture_cursor=0:width=1920:height=1080:resize_mode=scale_aspect,fps=60"), "{a}");
         assert!(a.contains("-c:v h264_nvenc") && a.contains("-g 60") && a.contains("-f mpegts") && a.ends_with("pipe:1"));
         assert!(!a.contains("hwdownload"));
         let native = plan(&Capture { resolution: "native".into(), ..cfg.clone() }, 1920, 1080, "libx264");
         assert_eq!(native.width, 0);
-        let a = args(&Source::Window(42), &native, true, None).join(" ");
+        let a = args(&Source::Window(42), &native, true, None, None).join(" ");
         assert!(a.contains("gfxcapture=hwnd=42:max_framerate=60:capture_cursor=1:resize_mode=scale_aspect,fps=60,hwdownload"), "{a}");
         // With the killfeed tap: the capture splits, video is mapped explicitly,
         // and the tap goes to the pipe as raw frames.
-        let a = args(&Source::Monitor(7), &p, false, Some(r"\\.\pipe\x")).join(" ");
+        let a = args(&Source::Monitor(7), &p, false, Some(r"\\.\pipe\x"), None).join(" ");
         assert!(a.contains(",fps=60,split=2[cap][tap];[tap]fps=4,hwdownload,format=bgra,crop="), "{a}");
         assert!(a.contains("[kf];[cap]null[vid]") && a.contains("-map [vid]"), "{a}");
         assert!(a.ends_with(r"-map [kf] -f rawvideo -pix_fmt bgr24 -y \\.\pipe\x"), "{a}");
-        let a = args(&Source::Monitor(7), &native, false, Some("p")).join(" ");
+        let a = args(&Source::Monitor(7), &native, false, Some("p"), None).join(" ");
         assert!(a.contains("[kf];[cap]null,hwdownload,format=bgra,format=yuv420p[vid]"), "{a}");
+    }
+
+    #[test]
+    fn hand_cam_is_drawn_onto_the_game() {
+        let p = plan(&Capture::default(), 1920, 1080, "h264_nvenc");
+        let cam = super::super::camfeed::Overlay { pipe: r"\\.\pipe\cam".into(), size: (480, 270), at: (1402, 734), fps: 60 };
+        let a = args(&Source::Monitor(7), &p, false, None, Some(&cam));
+        let g = &a[a.iter().position(|s| s == "-filter_complex").unwrap() + 1];
+        assert!(g.contains("hwdownload,format=bgra,format=nv12,settb=AVTB,setpts=RTCTIME-RTCSTART[game]"), "{g}");
+        assert!(g.contains("[0:v]settb=AVTB,setpts=RTCTIME-RTCSTART+25000[cam];[game][cam]overlay=1402:734:format=yuv420,format=nv12[vid]"), "{g}");
+        let j = a.join(" ");
+        assert!(j.contains("-f rawvideo -pix_fmt rgba -video_size 480x270 -framerate 60"), "{j}");
+        assert!(j.contains("-map [vid]"), "{j}");
     }
 }
