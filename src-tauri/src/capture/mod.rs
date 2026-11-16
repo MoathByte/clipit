@@ -263,7 +263,12 @@ impl Engine {
         if died {
             let c = cam.take().unwrap();
             let err = c.stderr.lock().unwrap().trim().lines().last().unwrap_or("").to_string();
+            // Refused the size/rate we asked for? Try its own defaults right away.
+            let retry = c.picked_mode && c.started.elapsed() < Duration::from_secs(8) && camfeed::use_plain(&c.device);
             c.stop();
+            if retry {
+                return;
+            }
             let msg = if err.is_empty() || err.contains("Could not") || err.contains("I/O error") {
                 "The camera isn't connected or is in use by another app.".to_string()
             } else {

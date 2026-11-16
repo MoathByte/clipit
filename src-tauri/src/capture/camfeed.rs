@@ -144,10 +144,99 @@ pub fn key(h: &HandCam, size: (u32, u32), fps: u32) -> String {
     )
 }
 
+/// One way a camera can send pictures (from `-list_options`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mode {
+    /// ("vcodec", "mjpeg") or ("pixel_format", "yuyv422").
+    pub kind: String,
+    pub name: String,
+    pub w: u32,
+    pub h: u32,
+    pub min_fps: f64,
+    pub max_fps: f64,
+}
+
+pub fn parse_modes(text: &str) -> Vec<Mode> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(i) = line.find("vcodec=").or_else(|| line.find("pixel_format=")) else { continue };
+        let mut words = line[i..].split_whitespace();
+        let Some((kind, name)) = words.next().and_then(|w| w.split_once('=')) else { continue };
+        let rest: Vec<&str> = words.collect();
+        let size = |w: &str| w.strip_prefix("s=").and_then(|s| s.split_once('x')).and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)));
+        let fps = |w: &str| w.strip_prefix("fps=").and_then(|f| f.parse::<f64>().ok());
+        // "min s=WxH fps=A max s=WxH fps=B"
+        let (Some(min_at), Some(max_at)) = (rest.iter().position(|w| *w == "min"), rest.iter().position(|w| *w == "max")) else { continue };
+        let (Some((w, h)), Some(min_fps), Some(max_fps)) = (rest.get(max_at + 1).and_then(|w| size(w)), rest.get(min_at + 2).and_then(|w| fps(w)), rest.get(max_at + 2).and_then(|w| fps(w))) else { continue };
+        out.push(Mode { kind: kind.into(), name: name.into(), w, h, min_fps, max_fps });
+    }
+    out
+}
+
+/// The camera mode to ask for: fast enough for `fps` first, then the smallest
+/// picture at least `height` tall (else the biggest), then uncompressed over
+/// MJPEG. Without this many webcams send their biggest uncompressed picture,
+/// which USB can only carry at a few frames a second.
+pub fn pick_mode(modes: &[Mode], height: u32, fps: u32) -> Option<Mode> {
+    let fast = |m: &Mode| m.max_fps + 0.5 >= fps as f64;
+    let usable: Vec<&Mode> = modes.iter().filter(|m| m.kind == "pixel_format" || m.name == "mjpeg").collect();
+    let pool: Vec<&Mode> = if usable.iter().any(|m| fast(m)) { usable.into_iter().filter(|m| fast(m)).collect() } else { usable };
+    pool.into_iter()
+        .min_by(|a, b| {
+            let key = |m: &Mode| {
+                let big_enough = m.h >= height;
+                (
+                    // the fastest first when nothing reaches the frame rate
+                    if fast(m) { 0 } else { -(m.max_fps * 100.0) as i64 },
+                    !big_enough,
+                    if big_enough { m.h as i64 } else { -(m.h as i64) },
+                    m.kind != "pixel_format",
+                )
+            };
+            key(a).cmp(&key(b))
+        })
+        .cloned()
+}
+
+/// Modes per camera (asking takes a moment, so it's done once).
+static MODES: Mutex<Vec<(String, Vec<Mode>)>> = Mutex::new(Vec::new());
+/// Cameras that refused the mode we asked for: opened with their defaults.
+static PLAIN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub fn camera_modes(ffmpeg: &Path, device: &str) -> Vec<Mode> {
+    if let Some((_, m)) = MODES.lock().unwrap().iter().find(|(d, _)| d == device) {
+        return m.clone();
+    }
+    let mut cmd = Command::new(ffmpeg);
+    cmd.args(["-hide_banner", "-list_options", "true", "-f", "dshow", "-i"]).arg(format!("video={device}")).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let modes = cmd.output().map(|o| parse_modes(&String::from_utf8_lossy(&o.stderr))).unwrap_or_default();
+    if !modes.is_empty() {
+        MODES.lock().unwrap().push((device.to_string(), modes.clone()));
+    }
+    modes
+}
+
+/// The camera didn't start with the mode we picked: use its defaults next time.
+pub fn use_plain(device: &str) -> bool {
+    let mut p = PLAIN.lock().unwrap();
+    if p.iter().any(|d| d == device) {
+        return false;
+    }
+    p.push(device.to_string());
+    true
+}
+
 /// ffmpeg arguments: camera → finished RGBA frames of `size` on stdout.
-pub fn camera_args(h: &HandCam, size: (u32, u32), fps: u32) -> Vec<String> {
+pub fn camera_args(h: &HandCam, size: (u32, u32), fps: u32, mode: Option<&Mode>) -> Vec<String> {
     let height = h.height.clamp(240, 2160);
     let mut a: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin", "-f", "dshow", "-rtbufsize", "64M"].iter().map(|s| s.to_string()).collect();
+    if let Some(m) = mode {
+        let rate = (h.fps.clamp(15, 60) as f64).clamp(m.min_fps, m.max_fps);
+        a.extend([format!("-{}", if m.kind == "vcodec" { "vcodec" } else { "pixel_format" }), m.name.clone()]);
+        a.extend(["-video_size".to_string(), format!("{}x{}", m.w, m.h), "-framerate".to_string(), format!("{rate:.3}")]);
+    }
     a.extend(["-i".to_string(), format!("video={}", h.device)]);
     // Shrink big camera pictures first (cheap), then the hand cam chain.
     let vf = format!("scale=-2:'min(ih,{height})',fps={fps},{},format=rgba", handcam::camera_filter(h, size.0, size.1));
@@ -157,6 +246,10 @@ pub fn camera_args(h: &HandCam, size: (u32, u32), fps: u32) -> Vec<String> {
 
 pub struct CamProc {
     pub key: String,
+    /// Started with a mode we picked (else the camera's defaults).
+    pub picked_mode: bool,
+    pub started: Instant,
+    pub device: String,
     child: Child,
     reader: Option<JoinHandle<()>>,
     pub stderr: Arc<Mutex<String>>,
@@ -164,8 +257,10 @@ pub struct CamProc {
 
 impl CamProc {
     pub fn start(ffmpeg: &Path, h: &HandCam, size: (u32, u32), fps: u32, feed: Arc<Feed>, register: &dyn Fn(&Child)) -> Result<Self, String> {
+        let plain = PLAIN.lock().unwrap().iter().any(|d| *d == h.device);
+        let mode = if plain { None } else { pick_mode(&camera_modes(ffmpeg, &h.device), h.height, h.fps) };
         let mut cmd = Command::new(ffmpeg);
-        cmd.args(camera_args(h, size, fps)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(camera_args(h, size, fps, mode.as_ref())).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         cmd.creation_flags(0x0800_0000);
         let mut child = cmd.spawn().map_err(|e| format!("Couldn't start ffmpeg: {e}"))?;
@@ -204,7 +299,7 @@ impl CamProc {
                 }
             }
         });
-        Ok(Self { key: key(h, size, fps), child, reader: Some(reader), stderr })
+        Ok(Self { key: key(h, size, fps), picked_mode: mode.is_some(), started: Instant::now(), device: h.device.clone(), child, reader: Some(reader), stderr })
     }
 
     pub fn exited(&mut self) -> bool {
@@ -266,6 +361,32 @@ mod tests {
         assert_eq!(at(1, 1)[3], 0, "corner is outside the circle");
         assert_eq!(at(50, 50), &[10, 10, 10, 255], "middle is the camera");
         assert!(at(50, 1)[0] > 240, "top edge is the white border");
+    }
+
+    #[test]
+    fn picks_a_mode_that_keeps_up() {
+        // A typical USB webcam: uncompressed 1080p only at 5 fps, MJPEG at 30.
+        let text = r#"[in#0 @ 0]  Pin "Capture" (alternative pin name "0")
+[in#0 @ 0]   vcodec=mjpeg  min s=1920x1080 fps=30 max s=1920x1080 fps=30
+[in#0 @ 0]   vcodec=mjpeg  min s=1280x720 fps=30 max s=1280x720 fps=30
+[in#0 @ 0]   pixel_format=yuyv422  min s=1920x1080 fps=5 max s=1920x1080 fps=5
+[in#0 @ 0]   pixel_format=yuyv422  min s=1280x720 fps=10 max s=1280x720 fps=10
+[in#0 @ 0]   pixel_format=yuyv422  min s=640x480 fps=30 max s=640x480 fps=30
+[in#0 @ 0]   unknown compression type 0x34363248  min s=1920x1080 fps=30 max s=1920x1080 fps=30"#;
+        let modes = parse_modes(text);
+        assert_eq!(modes.len(), 5);
+        let m = pick_mode(&modes, 720, 30).unwrap();
+        assert_eq!((m.name.as_str(), m.h), ("mjpeg", 720));
+        let m = pick_mode(&modes, 480, 30).unwrap();
+        assert_eq!((m.name.as_str(), m.h), ("yuyv422", 480));
+        let m = pick_mode(&modes, 1080, 60).unwrap();
+        assert_eq!((m.name.as_str(), m.h), ("mjpeg", 1080), "nothing reaches 60: fastest, then size");
+        // Iriun: raw only, up to 60 fps.
+        let iriun = parse_modes("[in#0 @ 0]   pixel_format=yuyv422  min s=1280x720 fps=29.97 max s=1280x720 fps=59.9999\n[in#0 @ 0]   pixel_format=yuyv422  min s=1920x1080 fps=29.97 max s=1920x1080 fps=59.9999");
+        let m = pick_mode(&iriun, 720, 30).unwrap();
+        assert_eq!(m.h, 720);
+        let a = camera_args(&HandCam { device: "Cam".into(), fps: 30, ..Default::default() }, (480, 270), 60, Some(&m)).join(" ");
+        assert!(a.contains("-pixel_format yuyv422 -video_size 1280x720 -framerate 30.000 -i video=Cam"), "{a}");
     }
 
     #[test]

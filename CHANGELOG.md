@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.2
+
+- **Fix: choppy hand cam (2–5 fps) on some webcams.** Clipit now asks the camera for a size and frame rate it can
+  deliver smoothly (using its MJPEG mode when it has one). Before, many USB webcams sent their biggest uncompressed
+  picture, which they can only send a few times a second. If a camera refuses, it falls back to its defaults.
+
 ## 0.12.1
 
 - **Hand cam is now live, like a camera source in OBS**: the camera is drawn onto the game while it records, so saving
