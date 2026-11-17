@@ -207,7 +207,8 @@ pub fn rename(path: &Path, new_name: &str) -> Result<PathBuf, String> {
     if target.exists() && !same_file_other_case {
         return Err("A clip with that name already exists".into());
     }
-    std::fs::rename(path, &target).map_err(|e| match e.raw_os_error() {
+    // A short wait covers antivirus peeking at the file; a player holding it gets the message.
+    crate::capture::mux::rename_retry(path, &target, std::time::Duration::from_secs(2)).map_err(|e| match e.raw_os_error() {
         Some(32) => "The clip is open in another program — close it and try again".to_string(),
         _ => format!("Couldn't rename: {e}"),
     })?;

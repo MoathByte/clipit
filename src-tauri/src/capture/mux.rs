@@ -245,6 +245,23 @@ fn audio_input(cmd: &mut Command, pipe: &str, channels: u32) {
     cmd.args(["-f", "s16le", "-ar", "48000", "-ac", &channels.to_string(), "-i", pipe]);
 }
 
+/// Renames `from` to `to`, waiting out a brief lock. Right after ffmpeg closes a
+/// new file, antivirus (Windows Defender) or the drive may open it to scan for a
+/// moment, and the rename fails with "used by another process" (os error 32).
+pub fn rename_retry(from: &Path, to: &Path, max_wait: std::time::Duration) -> std::io::Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        match std::fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            // 5 access denied, 32 sharing violation, 33 lock violation
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32 | 33)) && start.elapsed() < max_wait => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn finish(child: Child, part: &Path, out: &Path) -> Result<u64, String> {
     let output = child.wait_with_output().map_err(|e| e.to_string())?;
     if !output.status.success() {
@@ -252,7 +269,7 @@ fn finish(child: Child, part: &Path, out: &Path) -> Result<u64, String> {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(err.lines().last().unwrap_or("ffmpeg failed").trim().to_string());
     }
-    std::fs::rename(part, out).map_err(|e| e.to_string())?;
+    rename_retry(part, out, std::time::Duration::from_secs(15)).map_err(|e| e.to_string())?;
     Ok(std::fs::metadata(out).map(|m| m.len()).unwrap_or(0))
 }
 
@@ -412,5 +429,28 @@ mod tests {
     #[test]
     fn part_names() {
         assert_eq!(part_path(Path::new(r"D:\a\b.mp4")), PathBuf::from(r"D:\a\b.mp4.part"));
+    }
+
+    /// Another program (like antivirus) has the new clip open for a moment:
+    /// the rename waits for it instead of failing with os error 32.
+    #[cfg(windows)]
+    #[test]
+    fn rename_waits_out_a_busy_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("clipit-busy-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (part, out) = (dir.join("a.mp4.part"), dir.join("a.mp4"));
+        std::fs::write(&part, b"clip").unwrap();
+        // Open without FILE_SHARE_DELETE, as a scanner may: renaming is refused.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(1 /* read */).open(&part).unwrap();
+        assert_eq!(std::fs::rename(&part, &out).unwrap_err().raw_os_error(), Some(32));
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            drop(held);
+        });
+        rename_retry(&part, &out, std::time::Duration::from_secs(5)).unwrap();
+        t.join().unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"clip");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

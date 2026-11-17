@@ -1431,17 +1431,52 @@ pub fn recover_parts(root: &Path) {
             if !name.ends_with(".mp4.part") {
                 continue;
             }
-            if is_fragmented(&p) {
-                // A recording (fragmented MP4): everything written so far plays.
+            // A recording (fragmented MP4) plays up to where it stopped; a replay
+            // that was fully written but couldn't be renamed (the file was busy)
+            // is a whole clip. Only a half-written replay is useless.
+            if is_fragmented(&p) || is_complete_mp4(&p) {
                 let fixed = PathBuf::from(name.trim_end_matches(".part"));
                 if !fixed.exists() {
                     let _ = std::fs::rename(&p, fixed);
                 }
             } else {
-                let _ = std::fs::remove_file(&p); // half-written replay: useless
+                let _ = std::fs::remove_file(&p);
             }
         }
     }
+}
+
+/// A finished (non-fragmented) MP4: its top-level boxes run exactly to the end
+/// of the file and include the index (moov) and the media (mdat). ffmpeg writes
+/// the moov last, so a half-written replay has none.
+fn is_complete_mp4(p: &Path) -> bool {
+    use std::io::Seek;
+    let Ok(mut f) = std::fs::File::open(p) else { return false };
+    let Ok(len) = f.metadata().map(|m| m.len()) else { return false };
+    let (mut pos, mut moov, mut mdat) = (0u64, false, false);
+    while pos < len {
+        let mut h = [0u8; 16];
+        if f.seek(std::io::SeekFrom::Start(pos)).is_err() || f.read_exact(&mut h[..8]).is_err() {
+            return false;
+        }
+        let mut size = u32::from_be_bytes([h[0], h[1], h[2], h[3]]) as u64;
+        if size == 1 {
+            if f.read_exact(&mut h[8..16]).is_err() {
+                return false;
+            }
+            size = u64::from_be_bytes(h[8..16].try_into().unwrap());
+        }
+        if size < 8 {
+            return false; // 0 = "to the end of the file": an unfinished mdat
+        }
+        match &h[4..8] {
+            b"moov" => moov = true,
+            b"mdat" => mdat = true,
+            _ => {}
+        }
+        pos += size;
+    }
+    pos == len && moov && mdat
 }
 
 /// Recordings are fragmented MP4s (a "moof" box near the start); saved replays
@@ -1677,9 +1712,19 @@ mod tests {
         std::fs::create_dir_all(&g).unwrap();
         std::fs::write(g.join("Game 2026.01.01 - 00.00.00.00.mp4.part"), b"\x00\x00\x00\x18ftypiso5....moof rec").unwrap();
         std::fs::write(g.join("Game 2026.01.01 - 00.00.00.01.mp4.part"), b"half").unwrap();
+        // A whole replay whose rename failed: ftyp, moov, mdat, ending exactly at the end.
+        let mp4box = |t: &[u8], body: usize| { let mut b = ((8 + body) as u32).to_be_bytes().to_vec(); b.extend(t); b.extend(vec![0u8; body]); b };
+        let whole = [mp4box(b"ftyp", 8), mp4box(b"moov", 20), mp4box(b"free", 4), mp4box(b"mdat", 100)].concat();
+        std::fs::write(g.join("Game 2026.01.01 - 00.00.00.02.mp4.part"), &whole).unwrap();
+        // Half-written replay: no moov yet, mdat cut short.
+        let cut = [mp4box(b"ftyp", 8), mp4box(b"free", 20), mp4box(b"mdat", 100)].concat();
+        std::fs::write(g.join("Game 2026.01.01 - 00.00.00.03.mp4.part"), &cut[..cut.len() - 30]).unwrap();
         recover_parts(&root);
         assert!(g.join("Game 2026.01.01 - 00.00.00.00.mp4").exists());
         assert!(!g.join("Game 2026.01.01 - 00.00.00.01.mp4.part").exists());
+        assert!(g.join("Game 2026.01.01 - 00.00.00.02.mp4").exists(), "a whole clip is kept");
+        assert!(!g.join("Game 2026.01.01 - 00.00.00.03.mp4.part").exists());
+        assert!(!g.join("Game 2026.01.01 - 00.00.00.03.mp4").exists());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

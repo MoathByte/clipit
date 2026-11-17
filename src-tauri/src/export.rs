@@ -342,7 +342,7 @@ pub fn run(
         if out.exists() {
             let _ = std::fs::remove_file(out);
         }
-        std::fs::rename(&part, out).map_err(|e| e.to_string())?;
+        crate::capture::mux::rename_retry(&part, out, std::time::Duration::from_secs(15)).map_err(|e| e.to_string())?;
         on_progress(100.0, pass);
         break Ok(ExportResult {
             output: out.to_string_lossy().into_owned(),

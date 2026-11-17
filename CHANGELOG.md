@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.2
+
+### Fixed
+- **"Couldn't save the clip: ... being used by another process (os error 32)".** Right after a clip is written,
+  another program (often antivirus) can open it for a moment, and since 0.13.1 saves finish fast enough to run into
+  that. Clipit now waits it out (up to 15 s, in the background) instead of failing. The same goes for exports and
+  renaming a clip.
+- **Clips caught by that error are no longer deleted.** A clip that was fully saved but left as a ".mp4.part" file is
+  now recovered when Clipit starts; only half-written files are removed.
+
 ## 0.13.1
 
 ### Fixed
