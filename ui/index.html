@@ -133,7 +133,7 @@
           </button>
           <div class="video-col" id="video-col">
             <div class="video-wrap paused" id="video-wrap">
-              <video id="p-video" preload="metadata"></video>
+              <video id="p-video" preload="metadata" crossorigin="anonymous"></video>
               <div class="busy-cover hidden" id="p-busy">
                 <span class="spin"></span>
                 <span class="busy-title">Adding hand cam…</span>
@@ -159,7 +159,18 @@
                 </button>
                 <div class="vc-time"><b id="vc-cur">0:00</b><span class="sep">/</span><span id="vc-dur">0:00</span></div>
                 <div class="vc-spacer"></div>
-                <button class="vc-btn vc-speed" id="vc-speed" title="Playback speed">1×</button>
+                <div class="vc-speedbox">
+                  <button class="vc-btn vc-speed" id="vc-speed" title="Speed ([ and ] to change, scroll to adjust)" aria-haspopup="dialog" aria-expanded="false">1×</button>
+                  <div class="speed-pop hidden" id="vc-speed-pop" role="dialog" aria-label="Playback speed">
+                    <div class="speed-head"><span>Speed</span><b id="vc-speed-val">1.0×</b></div>
+                    <input type="range" class="speed-range" id="vc-speed-range" min="0.1" max="2" step="0.1" value="1" aria-label="Playback speed">
+                    <div class="speed-scale"><span>0.1×</span><span>1×</span><span>2×</span></div>
+                    <div class="speed-chips" id="vc-speed-chips">
+                      <button data-rate="0.2">0.2×</button><button data-rate="0.5">0.5×</button><button data-rate="1">1×</button><button data-rate="1.5">1.5×</button><button data-rate="2">2×</button>
+                    </div>
+                    <p class="speed-note">Speed changes ease in and out. In slow motion the sound is evened out, so quiet moments stay clear.</p>
+                  </div>
+                </div>
                 <button class="vc-btn" id="vc-mute" title="Mute (M)" aria-label="Mute">
                   <svg viewBox="0 0 24 24" class="ic-vol"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16.5 9a4 4 0 0 1 0 6M19 6.5a7.5 7.5 0 0 1 0 11"/></svg>
                   <svg viewBox="0 0 24 24" class="ic-muted"><path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M17 9.5l5 5M22 9.5l-5 5"/></svg>

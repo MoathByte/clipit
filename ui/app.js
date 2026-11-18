@@ -1423,16 +1423,117 @@ vc.mute.onclick = toggleMute;
 video.addEventListener("volumechange", syncVolume);
 syncVolume();
 
-const SPEEDS = [1, 0.5, 0.25, 2];
-function setSpeed(rate) {
-  video.defaultPlaybackRate = rate;
-  video.playbackRate = rate;
-  vc.speed.textContent = rate + "×";
-  vc.speed.classList.toggle("on", rate !== 1);
+// Speed: 0.1× to 2× in 0.1 steps. Changes ramp like a velocity edit (ease in, ease out)
+// instead of jumping, and slow motion runs the sound through a leveller so it stays even.
+const SPEED_MIN = 0.1, SPEED_MAX = 2;
+const speedPop = $("#vc-speed-pop");
+const speedRange = $("#vc-speed-range");
+const roundRate = (r) => Math.round(Math.min(SPEED_MAX, Math.max(SPEED_MIN, r)) * 10) / 10;
+const fmtRate = (r) => (r === Math.round(r) ? String(r) : r.toFixed(1)) + "×";
+let speedTarget = 1;
+let rampRaf = 0;
+
+// Loudness levelling for slow motion: compressor + makeup gain + a limiter, blended in as the
+// clip slows down (dry at 1× and above, fully levelled from 0.7× down). Built on first use,
+// from a click, so the audio context is allowed to run.
+let leveller = null;
+function ensureLeveller() {
+  if (leveller !== null) return leveller;
+  leveller = false;
+  try {
+    const ctx = new AudioContext();
+    const src = ctx.createMediaElementSource(video);
+    const dry = ctx.createGain();
+    const wet = ctx.createGain();
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -30; comp.knee.value = 12; comp.ratio.value = 4;
+    comp.attack.value = 0.005; comp.release.value = 0.3;
+    const makeup = ctx.createGain();
+    makeup.gain.value = 2.2; // about +7 dB, brings quiet parts up to normal level
+    const limit = ctx.createDynamicsCompressor();
+    limit.threshold.value = -2; limit.knee.value = 0; limit.ratio.value = 20;
+    limit.attack.value = 0.001; limit.release.value = 0.1;
+    src.connect(dry).connect(ctx.destination);
+    src.connect(comp).connect(makeup).connect(limit).connect(wet).connect(ctx.destination);
+    wet.gain.value = 0;
+    leveller = { ctx, dry, wet };
+  } catch (e) {
+    console.warn("audio leveller unavailable", e);
+  }
+  return leveller;
 }
-vc.speed.onclick = () => setSpeed(SPEEDS[(SPEEDS.indexOf(video.defaultPlaybackRate) + 1) % SPEEDS.length]);
+function setLevelling(rate) {
+  if (!leveller) {
+    if (rate >= 1) return;
+    ensureLeveller();
+    if (!leveller) return;
+  }
+  const { ctx, dry, wet } = leveller;
+  if (ctx.state === "suspended") ctx.resume().catch(() => {});
+  const amount = Math.min(1, Math.max(0, (1 - rate) / 0.3));
+  // Equal-power blend, smoothed so it never clicks.
+  wet.gain.setTargetAtTime(Math.sin((amount * Math.PI) / 2), ctx.currentTime, 0.05);
+  dry.gain.setTargetAtTime(Math.cos((amount * Math.PI) / 2), ctx.currentTime, 0.05);
+}
+video.addEventListener("play", () => { if (leveller && leveller.ctx.state === "suspended") leveller.ctx.resume().catch(() => {}); });
+video.preservesPitch = true;
+
+// Velocity-style curve: slow start, fast middle, soft landing.
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+function applyRate(r) {
+  video.playbackRate = r;
+  setLevelling(r);
+}
+function setSpeed(rate, { instant = false } = {}) {
+  rate = roundRate(rate);
+  speedTarget = rate;
+  video.defaultPlaybackRate = rate;
+  vc.speed.textContent = fmtRate(rate);
+  vc.speed.classList.toggle("on", rate !== 1);
+  $("#vc-speed-val").textContent = rate.toFixed(1) + "×";
+  speedRange.value = String(rate);
+  speedRange.style.setProperty("--v", ((rate - SPEED_MIN) / (SPEED_MAX - SPEED_MIN)) * 100 + "%");
+  document.querySelectorAll("#vc-speed-chips button").forEach((b) => b.classList.toggle("on", Number(b.dataset.rate) === rate));
+  cancelAnimationFrame(rampRaf);
+  rampRaf = 0;
+  const from = video.playbackRate;
+  const still = video.paused || video.ended || document.body.classList.contains("reduce-motion");
+  if (instant || still || Math.abs(from - rate) < 0.001) { applyRate(rate); return; }
+  // Bigger changes take a little longer, like a hand-made ramp: 0.35 s to 0.9 s.
+  const dur = 350 + 550 * Math.min(1, Math.abs(Math.log(rate / from)) / Math.log(10));
+  const t0 = performance.now();
+  // Ramp in log space so 1× → 0.1× feels as even as 0.1× → 1×.
+  const a = Math.log(from), b = Math.log(rate);
+  const tick = (now) => {
+    const t = Math.min(1, (now - t0) / dur);
+    applyRate(Math.exp(a + (b - a) * easeInOut(t)));
+    rampRaf = t < 1 && !video.paused ? requestAnimationFrame(tick) : 0;
+    if (!rampRaf && t < 1) applyRate(rate); // paused mid-ramp: land on the target
+  };
+  rampRaf = requestAnimationFrame(tick);
+}
+
+function openSpeedPop(open) {
+  speedPop.classList.toggle("hidden", !open);
+  vc.speed.setAttribute("aria-expanded", String(open));
+}
+const speedPopOpen = () => !speedPop.classList.contains("hidden");
+vc.speed.onclick = (e) => { e.stopPropagation(); openSpeedPop(!speedPopOpen()); };
+speedPop.addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("pointerdown", (e) => {
+  if (speedPopOpen() && !speedPop.contains(e.target) && e.target !== vc.speed) openSpeedPop(false);
+});
+speedRange.addEventListener("input", () => setSpeed(parseFloat(speedRange.value)));
+document.querySelectorAll("#vc-speed-chips button").forEach((b) => { b.onclick = () => setSpeed(Number(b.dataset.rate)); });
+vc.speed.addEventListener("wheel", (e) => { e.preventDefault(); setSpeed(speedTarget + (e.deltaY < 0 ? 0.1 : -0.1)); }, { passive: false });
+speedPop.addEventListener("wheel", (e) => { e.preventDefault(); setSpeed(speedTarget + (e.deltaY < 0 ? 0.1 : -0.1)); }, { passive: false });
+setSpeed(1, { instant: true });
 // A new src resets the rate; keep the chosen speed across clips.
-video.addEventListener("loadstart", () => { if (video.playbackRate !== video.defaultPlaybackRate) video.playbackRate = video.defaultPlaybackRate; });
+video.addEventListener("loadstart", () => {
+  cancelAnimationFrame(rampRaf);
+  rampRaf = 0;
+  if (video.playbackRate !== speedTarget) applyRate(speedTarget);
+});
 
 // --- waveform ---
 const waves = new Map(); // clip path -> peaks (0–255), small cache
@@ -1679,7 +1780,9 @@ window.addEventListener("keydown", (e) => {
   if (typing && (e.key !== "Escape" || e.target.id === "p-rename-input")) return;
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   const handled = {
-    Escape: () => (ed.open ? setEditor(false) : closePlayer()),
+    Escape: () => (speedPopOpen() ? openSpeedPop(false) : ed.open ? setEditor(false) : closePlayer()),
+    "[": () => setSpeed(speedTarget - 0.1),
+    "]": () => setSpeed(speedTarget + 0.1),
     ArrowLeft: () => { video.currentTime = Math.max(0, video.currentTime - 5); },
     ArrowRight: () => { video.currentTime = Math.min(video.duration || 0, video.currentTime + 5); },
     ArrowUp: () => step(-1),
@@ -4086,6 +4189,67 @@ async function runAutotest() {
     }
     const st = await invoke("capture_status");
     check("recorder back up after restart", st.state === "buffering");
+    log("DONE");
+    return;
+  }
+  // Speed slider: 0.1 steps, eased ramp, and slow-motion audio levelling that really carries sound.
+  if (mode === "speed") {
+    const log = (m) => invoke("debug_log", { msg: m });
+    const check = (name, ok, extra = "") => log(`${ok ? "PASS" : "FAIL"} ${name}${extra ? " · " + extra : ""}`);
+    go({ name: "all" });
+    await wait(1500);
+    openPlayer(state.list, 0);
+    await wait(2500);
+    if (video.paused) await video.play().catch((e) => log("play failed: " + e));
+    await wait(1000);
+    const t1 = video.currentTime;
+    await wait(1000);
+    check("clip plays (cross-origin load works)", video.currentTime > t1 + 0.5 && !video.error, `t ${t1.toFixed(2)} → ${video.currentTime.toFixed(2)}`);
+    vc.speed.click();
+    await wait(100);
+    check("speed button opens the slider", speedPopOpen());
+    check("slider steps by 0.1", speedRange.step === "0.1" && speedRange.min === "0.1" && speedRange.max === "2");
+    speedRange.value = "0.3";
+    speedRange.dispatchEvent(new Event("input"));
+    const samples = [];
+    const t0 = performance.now();
+    while (performance.now() - t0 < 1200) { samples.push(+video.playbackRate.toFixed(3)); await wait(60); }
+    log("ramp 1 → 0.3: " + samples.join(" "));
+    const mids = samples.filter((r) => r < 0.98 && r > 0.32);
+    check("rate ramps through in-between speeds", mids.length >= 4, mids.length + " in-between samples");
+    check("ramp only goes down (no overshoot)", samples.every((r, i) => i === 0 || r <= samples[i - 1] + 0.001));
+    check("lands on 0.3×", Math.abs(video.playbackRate - 0.3) < 0.001 && vc.speed.textContent === "0.3×", vc.speed.textContent);
+    check("leveller built", !!leveller, leveller ? leveller.ctx.state : "none");
+    if (leveller) {
+      if (leveller.ctx.state !== "running") await leveller.ctx.resume().catch(() => {});
+      const an = leveller.ctx.createAnalyser();
+      an.fftSize = 2048;
+      leveller.wet.connect(an);
+      const buf = new Float32Array(an.fftSize);
+      let peak = 0;
+      for (let i = 0; i < 30; i++) { an.getFloatTimeDomainData(buf); for (const v of buf) peak = Math.max(peak, Math.abs(v)); await wait(100); }
+      check("levelled sound is coming through", peak > 0.001, "peak " + peak.toFixed(4) + " · ctx " + leveller.ctx.state);
+      check("fully levelled at 0.3×", leveller.wet.gain.value > 0.95 && leveller.dry.gain.value < 0.05, `wet ${leveller.wet.gain.value.toFixed(2)} dry ${leveller.dry.gain.value.toFixed(2)}`);
+      leveller.wet.disconnect(an);
+      leveller.wet.connect(leveller.ctx.destination);
+    }
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", bubbles: true }));
+    await wait(1200);
+    check("] adds 0.1", Math.abs(speedTarget - 0.4) < 1e-9, String(speedTarget));
+    setSpeed(1);
+    await wait(1200);
+    check("back to 1× with dry sound", video.playbackRate === 1 && (!leveller || leveller.dry.gain.value > 0.95));
+    openPlayer(state.list, 1);
+    setSpeed(0.5);
+    await wait(1500);
+    step(-1);
+    await wait(1500);
+    check("speed kept on the next clip", Math.abs(video.playbackRate - 0.5) < 0.001, String(video.playbackRate));
+    setSpeed(1, { instant: true });
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await wait(200);
+    check("Esc closes the slider first", !speedPopOpen() && !!state.player);
+    closePlayer();
     log("DONE");
     return;
   }

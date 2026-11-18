@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.0
+
+### New
+- **Slow motion slider.** Click the speed button under a clip for a slider from 0.1× to 2× in 0.1 steps, with quick
+  picks for 0.2×, 0.5×, 1×, 1.5× and 2×. Scroll on the button or press **[** / **]** to change it by 0.1. The speed
+  stays as you move between clips.
+- **Smooth speed ramps.** Changing speed eases into the new speed like a velocity edit (a slow start, a quick middle and
+  a soft landing) instead of jumping. Settings > Appearance > Reduce motion makes it instant.
+- **Even sound in slow motion.** Below 1× the sound is levelled: quiet parts are brought up, loud shots and explosions
+  don't blow out, and the pitch stays normal. At normal speed the sound is untouched.
+
 ## 0.13.3
 
 Bug fixes and stability.
