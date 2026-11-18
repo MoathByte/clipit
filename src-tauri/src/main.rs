@@ -602,6 +602,9 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
         Event::ClipUpdated { path, size } => {
             let _ = app.emit("clip-updated", serde_json::json!({ "path": path, "size": size }));
         }
+        Event::ClipBusy { path, task } => {
+            let _ = app.emit("clip-busy", serde_json::json!({ "path": path, "task": task }));
+        }
         Event::RecordingStarted(path) => {
             set_tray_recording(app, true);
             set_tray_tooltip(app, "Clipit \u{2014} \u{25CF} recording");
@@ -1478,6 +1481,18 @@ fn capture_status(state: State<AppState>) -> capture::Status {
     state.engine.status()
 }
 
+/// Clips still being worked on after saving: [[path, "handcam" | "reading"], ...].
+#[tauri::command]
+fn busy_clips(state: State<AppState>) -> Vec<(String, &'static str)> {
+    state.engine.busy_clips()
+}
+
+/// Settings → Recording → Restart recorder.
+#[tauri::command]
+fn restart_capture(state: State<AppState>) {
+    state.engine.restart();
+}
+
 #[derive(Serialize)]
 struct CaptureInfo {
     devices: capture::audio::AudioDevices,
@@ -1768,6 +1783,8 @@ fn main() {
             capture_status,
             capture_info,
             save_replay,
+            busy_clips,
+            restart_capture,
             toggle_recording,
             get_waveform,
             export_clip,

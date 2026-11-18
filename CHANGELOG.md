@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.13.3
+
+Bug fixes and stability.
+
+### Fixed
+- **Watching a clip while the hand cam is being added no longer lags.** The clip shows a spinner ("Adding hand cam…")
+  on its thumbnail, and opening it shows a short wait instead of a stuttering video. It plays on its own as soon as
+  the hand cam version is ready.
+- **Reading a VALORANT clip after saving is much lighter.** The map and agent are read from about one frame a second
+  instead of every frame (about 8× less work, same results), so a clip you're watching doesn't stutter meanwhile.
+  The thumbnail shows "Reading clip…" while it runs.
+- **Opening an older clip no longer lags while its kills are read.** Reading waits until you pause, so playback
+  stays smooth.
+
+### New
+- **Settings > Recording > Restart recorder.** If clipping lags or stops working, this starts capture, audio and the
+  hand cam fresh, like reopening Clipit. A recording in progress is saved first.
+
 ## 0.13.2
 
 ### Fixed

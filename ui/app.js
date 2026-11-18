@@ -503,6 +503,34 @@ const multiText = (k) => (k === 5 ? "Ace" : k >= 2 && k <= 4 ? `${k}K` : killTex
 const isValorant = (game) => String(game || "").trim().toLowerCase() === "valorant";
 
 // opts: { date: show the date before the time, game: show the game name }
+// ---------- clips still being worked on after saving ----------
+// "handcam": the clip is being replaced by its hand cam version (don't play it yet);
+// "reading": its map and agent are being read (playable, just a little busy).
+const busy = new Map(); // path -> task
+const BUSY_TEXT = { handcam: "Adding hand cam", reading: "Reading clip" };
+const busyClass = (path) => (busy.get(path) === "handcam" ? " busy" : "");
+const busyBadge = (path) => {
+  const t = busy.get(path);
+  return t ? `<span class="busy-badge"><span class="spin"></span>${BUSY_TEXT[t] || "Working"}…</span>` : "";
+};
+
+function setBusy(path, task) {
+  if (task) busy.set(path, task); else busy.delete(path);
+  // Cards on screen, in place (no re-render, so scrolling and hovers stay put).
+  document.querySelectorAll(".thumb[data-path]").forEach((t) => {
+    if (t.dataset.path !== path) return;
+    t.classList.toggle("busy", task === "handcam");
+    const old = t.querySelector(".busy-badge");
+    if (old) old.remove();
+    if (task) t.querySelector("img").insertAdjacentHTML("afterend", busyBadge(path));
+  });
+  const cur = curClip();
+  if (cur && cur.path === path) syncPlayerBusy();
+}
+
+listen("clip-busy", (e) => setBusy(e.payload.path, e.payload.task));
+invoke("busy_clips").then((list) => list.forEach(([p, t]) => setBusy(p, t))).catch(() => {});
+
 function clipCard(c, i, opts) {
   const when = (opts.date ? shortFmt.format(new Date(c.t)) + " · " : "") + timeFmt.format(new Date(c.t));
   const tags = tagText(c);
@@ -512,8 +540,9 @@ function clipCard(c, i, opts) {
     + (tags ? `<span class="clip-tags">${esc(tags)}</span>` : "");
   return `
     <button class="clip${c.favorite ? " is-fav" : ""}${sel.paths.has(c.path) ? " selected" : ""}" data-i="${i}">
-      <div class="thumb" data-path="${esc(c.path)}">
+      <div class="thumb${busyClass(c.path)}" data-path="${esc(c.path)}">
         <img alt="">
+        ${busyBadge(c.path)}
         <span class="sel-btn" role="button" title="Select (Ctrl+click, Shift+click for a range)"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
         <span class="play"><svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></span>
         ${c.edited ? `<span class="edited-badge">Edited</span>` : ""}
@@ -1114,8 +1143,31 @@ function showCurrentClip(opts = {}) {
   ensureKillTimes();
 }
 
+// While the hand cam is being added the file is about to be replaced, and playing
+// it fights the work for the disk: the player waits, then starts on its own.
+let heldClip = null; // { path, time, play } waiting for the hand cam
+function syncPlayerBusy() {
+  const c = curClip();
+  const waiting = !!c && busy.get(c.path) === "handcam";
+  $("#p-busy").classList.toggle("hidden", !waiting);
+  if (!waiting && heldClip && c && heldClip.path === c.path) {
+    const h = heldClip;
+    heldClip = null;
+    loadClipVideo(c, h.time, h.play);
+  }
+}
+
 // Loads a clip into the player, starting at `time`. Never plays while the overlay is hidden.
 function loadClipVideo(c, time, play) {
+  if (busy.get(c.path) === "handcam") {
+    heldClip = { path: c.path, time, play };
+    releaseVideo();
+    syncPlayerBusy();
+    updateProgress();
+    return;
+  }
+  heldClip = null;
+  $("#p-busy").classList.add("hidden");
   video.src = videoUrl(c.path);
   if (time > 0) {
     video.addEventListener("loadedmetadata", () => {
@@ -1204,6 +1256,11 @@ function ensureKillTimes() {
   if (c.kills == null && !cap.count_kills) return; // never counted and counting is off
   killTimesTimer = setTimeout(() => {
     if (curClip() !== c) return;
+    // Reading decodes the whole clip: wait while it plays, so playback stays smooth.
+    if (!video.paused && !video.ended) {
+      video.addEventListener("pause", () => { if (curClip() === c) ensureKillTimes(); }, { once: true });
+      return;
+    }
     readingTimes.add(c.path);
     invoke("read_kill_times", { path: c.path })
       .then((info) => setInfo(c.path, info))
@@ -2566,7 +2623,8 @@ function settingsPane(tab) {
         row("Format", "", selectB("capture.codec", codecs)),
         row("Encoder", "", selectB("capture.encoder", [["auto", "Automatic (best on this PC)"], ...encoders.map((e) => [e, encoderLabel(info.encoders, e)])])),
       ], "H.264 plays in Discord and everywhere else. HEVC and AV1 make smaller files, but some apps can't play them.")}
-      ${group("Sounds", [row("Chimes", "A short sound when a clip is saved or a recording starts or stops.", toggle("capture.sounds"))])}`;
+      ${group("Sounds", [row("Chimes", "A short sound when a clip is saved or a recording starts or stops.", toggle("capture.sounds"))])}
+      ${group("Troubleshooting", [row("Restart recorder", "If clipping lags or stops working, this starts capture, audio and the hand cam fresh, like reopening Clipit. A recording in progress is saved first, and the replay starts over.", `<button type="button" class="btn" id="set-restart-rec">Restart</button>`)])}`;
   }
   if (tab === "auto") {
     const on = c.auto_clip_kills;
@@ -3301,6 +3359,15 @@ function wireSettings() {
     rerenderSettings();
   });
   if ($("#set-wizard")) $("#set-wizard").onclick = async () => { if (await confirmLeaveSettings()) { dropSettingsDraft(); openWizard(); } };
+  if ($("#set-restart-rec")) $("#set-restart-rec").onclick = async (e) => {
+    const b = e.currentTarget;
+    b.disabled = true;
+    try {
+      await invoke("restart_capture");
+      toast("Restarting the recorder…");
+    } catch (err) { toast(String(err), true); }
+    setTimeout(() => { b.disabled = false; pollCapture(); }, 3000);
+  };
   if ($("#set-refresh-art")) $("#set-refresh-art").onclick = async () => {
     await invoke("refresh_art");
     state.art = {};
@@ -3450,7 +3517,7 @@ listen("clip-updated", (e) => {
   findClips(path).forEach((c) => { c.size = size; c.modified_ms = Date.now(); });
   state.thumbs.delete(path);
   const cur = state.player && state.player.list[state.player.index];
-  if (cur && cur.path === path) {
+  if (cur && cur.path === path && !heldClip) {
     const t = video.currentTime;
     const playing = !video.paused;
     loadClipVideo(cur, t, playing);
@@ -3977,6 +4044,49 @@ async function runAutotest() {
     closePlayer();
     await wait(5000);
     invoke("hide_window");
+    return;
+  }
+  // A clip being worked on: spinner on its card, the player waits, then plays.
+  if (mode === "busy") {
+    const log = (m) => invoke("debug_log", { msg: m });
+    const check = (name, ok) => log(`${ok ? "PASS" : "FAIL"} ${name}`);
+    go({ name: "all" });
+    await wait(1500);
+    const c = state.list[0];
+    setBusy(c.path, "handcam");
+    await wait(200);
+    const thumb = [...main.querySelectorAll(".thumb")].find((t) => t.dataset.path === c.path);
+    check("card dims and shows 'Adding hand cam…'", thumb && thumb.classList.contains("busy") && /Adding hand cam/.test(thumb.textContent));
+    openPlayer(state.list, 0);
+    await wait(1500);
+    check("player shows the waiting cover", !$("#p-busy").classList.contains("hidden"));
+    check("video isn't loaded while held", !video.getAttribute("src"));
+    setBusy(c.path, null);
+    await wait(2500);
+    check("cover hides when done", $("#p-busy").classList.contains("hidden"));
+    check("video loads when done", !!video.getAttribute("src") && video.readyState >= 1);
+    check("card spinner gone", !document.querySelector(".thumb.busy") && !document.querySelector(".busy-badge"));
+    setBusy(c.path, "reading");
+    await wait(200);
+    check("reading: badge but still playable", !!document.querySelector(".busy-badge") && $("#p-busy").classList.contains("hidden"));
+    setBusy(c.path, null);
+    closePlayer();
+    setUI.tab = "recording";
+    go({ name: "settings" });
+    await wait(1500);
+    check("Restart recorder button in Recording", !!$("#set-restart-rec"));
+    const before = Date.now();
+    $("#set-restart-rec").click();
+    let seen = "";
+    while (Date.now() - before < 20000) {
+      await wait(500);
+      const st = await invoke("capture_status");
+      if (st.message !== seen) { seen = st.message; log(`status: ${st.state} · ${st.message}`); }
+      if (Date.now() - before > 3000 && st.state === "buffering" && st.buffered_secs > 1) break;
+    }
+    const st = await invoke("capture_status");
+    check("recorder back up after restart", st.state === "buffering");
+    log("DONE");
     return;
   }
   if (mode === "scroll-stop") {

@@ -100,6 +100,9 @@ pub enum Event {
     Warning(String),
     /// A saved clip was replaced by a new version (the hand cam was added).
     ClipUpdated { path: PathBuf, size: u64 },
+    /// A saved clip is still being worked on ("handcam": being replaced with the
+    /// hand cam version; "reading": its map and agent are read). None = done.
+    ClipBusy { path: PathBuf, task: Option<&'static str> },
     RecordingStarted(PathBuf),
     RecordingStopped { path: PathBuf, size: u64 },
     RecordingFailed(String),
@@ -193,6 +196,10 @@ struct Shared {
     kill_watch_since: Mutex<Option<i64>>,
     /// One "running behind" warning per capture run is enough.
     warned_lag: AtomicBool,
+    /// Clips still being worked on after saving, with what's being done.
+    busy: Mutex<Vec<(PathBuf, &'static str)>>,
+    /// Settings → Recording → Restart recorder was pressed.
+    restart: AtomicBool,
     status: Mutex<Status>,
     job: Job,
     events: Box<dyn Fn(Event) + Send + Sync>,
@@ -230,6 +237,8 @@ impl Engine {
             kill_log: Mutex::new(Vec::new()),
             kill_watch_since: Mutex::new(None),
             warned_lag: AtomicBool::new(false),
+            busy: Mutex::new(Vec::new()),
+            restart: AtomicBool::new(false),
             status: Mutex::new(Status::default()),
             job: Job::new(),
             events,
@@ -259,6 +268,28 @@ impl Engine {
 
     pub fn is_recording(&self) -> bool {
         self.s.recording.lock().unwrap().is_some()
+    }
+
+    /// Settings → Recording → Restart recorder: starts capture, audio and the hand
+    /// cam fresh (the replay buffer is emptied). Returns right away.
+    pub fn restart(&self) {
+        self.s.restart.store(true, Ordering::SeqCst);
+    }
+
+    fn restart_now(&self) {
+        self.set_status("starting", "Restarting the recorder…", None);
+        self.stop_recording(); // saved properly, like when quitting
+        if let Some(r) = self.s.run.lock().unwrap().take() {
+            stop_running(r);
+        }
+        if let Some(c) = self.s.cam.lock().unwrap().take() {
+            stop_cam(c);
+        }
+        // Look for the video encoder again (a driver update or GPU reset may have changed it).
+        *self.s.encoders.lock().unwrap() = None;
+        *self.s.cam_error.lock().unwrap() = (String::new(), Instant::now());
+        *self.s.last_clip_end.lock().unwrap() = None;
+        self.s.warned_lag.store(false, Ordering::SeqCst);
     }
 
     /// Stops everything (app is quitting). Finishes a recording properly.
@@ -477,6 +508,11 @@ impl Engine {
         let mut failures = 0u32;
         loop {
             std::thread::sleep(Duration::from_millis(400));
+            if self.s.restart.swap(false, Ordering::SeqCst) {
+                self.restart_now();
+                failures = 0;
+                backoff_until = Instant::now();
+            }
             let cfg = self.s.cfg.lock().unwrap().clone();
             let Some(ffmpeg) = self.s.ffmpeg.clone() else {
                 self.set_status("no-ffmpeg", &self.s.ffmpeg_note, None);
@@ -884,6 +920,10 @@ impl Engine {
             println!("[clip] ffmpeg wrote the clip in {:?}", t0.elapsed());
             drop(snap);
             let saved = res.is_ok();
+            // Marked before "saved" goes out, so the clip never shows up as ready
+            // while it's about to be replaced or read.
+            let cam_busy = (saved && cam.is_some()).then(|| Busy::new(&shared, &out, "handcam"));
+            let read_busy = (saved && analyze).then(|| Busy::new(&shared, &out, "reading"));
             (shared.events)(match res {
                 Ok(size) => Event::ClipSaved { path: out.clone(), size, kills, kill_times: kill_times.clone() },
                 Err(e) => Event::ClipFailed(e),
@@ -905,9 +945,11 @@ impl Engine {
                     (shared.events)(Event::ClipInfo { path: out.clone(), info });
                 }
             }
+            drop(read_busy);
             if let Some(part) = with_cam {
                 swap_in(&shared, &part, &out);
             }
+            drop(cam_busy);
             if let Some((file, _)) = &cam {
                 let _ = std::fs::remove_file(file);
             }
@@ -1030,6 +1072,19 @@ impl Engine {
     // ---------- counting kills ----------
 
     /// Kills, map and agent in any VALORANT clip (reads the file, not the screen).
+    /// Clips still being worked on after saving: (path, "handcam" | "reading").
+    pub fn busy_clips(&self) -> Vec<(String, &'static str)> {
+        let list = self.s.busy.lock().unwrap();
+        let mut out: Vec<(String, &'static str)> = Vec::new();
+        for (p, _) in list.iter() {
+            let key = p.to_string_lossy().into_owned();
+            if !out.iter().any(|(k, _)| *k == key) {
+                out.push((key, busy_task(&list, p).unwrap_or("reading")));
+            }
+        }
+        out
+    }
+
     pub fn analyze(&self, clip: &Path) -> Result<valorant::ClipInfo, String> {
         let ffmpeg = self.s.ffmpeg.clone().ok_or("ffmpeg isn't installed")?;
         let info = valorant::analyze_clip(&ffmpeg, clip, &self.s.data_dir.join("valorant"), None, None, &|c| self.s.job.add(c));
@@ -1213,10 +1268,12 @@ impl Engine {
                     let hc = self.s.cfg.lock().unwrap().handcam.clone();
                     let (shared, path) = (self.s.clone(), path.clone());
                     let secs = (now_hns() - rec_start) as f64 / 1e7;
+                    let busy = Busy::new(&shared, &path, "handcam");
                     std::thread::spawn(move || {
                         if let Some(part) = add_handcam(&shared, &ffmpeg, &hc, &video, &path, &file, cam_start - rec_start, secs) {
                             swap_in(&shared, &part, &path);
                         }
+                        drop(busy);
                         let _ = std::fs::remove_file(&file);
                     });
                 }
@@ -1336,6 +1393,43 @@ fn add_handcam(shared: &Shared, ffmpeg: &Path, hc: &crate::config::HandCam, v: &
             None
         }
     }
+}
+
+/// Marks a clip as being worked on until dropped (also on failure).
+struct Busy {
+    shared: Arc<Shared>,
+    path: PathBuf,
+    task: &'static str,
+}
+
+impl Busy {
+    fn new(shared: &Arc<Shared>, path: &Path, task: &'static str) -> Self {
+        shared.busy.lock().unwrap().push((path.to_path_buf(), task));
+        announce_busy(shared, path);
+        Busy { shared: shared.clone(), path: path.to_path_buf(), task }
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let mut b = self.shared.busy.lock().unwrap();
+        if let Some(i) = b.iter().position(|(p, t)| *p == self.path && *t == self.task) {
+            b.remove(i);
+        }
+        drop(b);
+        announce_busy(&self.shared, &self.path);
+    }
+}
+
+/// What a clip is waiting for: the hand cam matters most (the file will change).
+fn busy_task(list: &[(PathBuf, &'static str)], path: &Path) -> Option<&'static str> {
+    let tasks: Vec<_> = list.iter().filter(|(p, _)| p == path).map(|(_, t)| *t).collect();
+    tasks.iter().find(|t| **t == "handcam").or(tasks.first()).copied()
+}
+
+fn announce_busy(shared: &Shared, path: &Path) {
+    let task = busy_task(&shared.busy.lock().unwrap(), path);
+    (shared.events)(Event::ClipBusy { path: path.to_path_buf(), task });
 }
 
 /// Puts the clip with the camera in place of the plain one. The player may have
@@ -1703,6 +1797,15 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(dir.join("data").join("handcam")).map(|r| r.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
         assert!(left.is_empty(), "temporary files left: {left:?}");
         println!("clips in {}", dir.display());
+    }
+
+    #[test]
+    fn busy_clips_report_the_hand_cam_first() {
+        let (a, b) = (PathBuf::from("clips/a.mp4"), PathBuf::from("clips/b.mp4"));
+        let list = vec![(a.clone(), "reading"), (a.clone(), "handcam"), (b.clone(), "reading")];
+        assert_eq!(busy_task(&list, &a), Some("handcam"), "the file will change: that's what to show");
+        assert_eq!(busy_task(&list, &b), Some("reading"));
+        assert_eq!(busy_task(&list[2..], &a), None);
     }
 
     #[test]

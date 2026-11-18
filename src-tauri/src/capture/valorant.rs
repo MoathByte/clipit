@@ -323,10 +323,13 @@ impl Frame {
     }
 }
 
-/// Up to `n` frames spread over the clip, scaled to 1920×1080.
+/// Up to `n` frames spread over the clip, scaled to 1920×1080. Only keyframes
+/// (one a second in Clipit's clips) are decoded: any moment of the round shows
+/// the map and agent, and decoding every frame took ~8× longer and made a clip
+/// that was playing at the same time stutter.
 fn frames(ffmpeg: &Path, clip: &Path, n: usize, on_spawn: &dyn Fn(&std::process::Child)) -> Vec<Frame> {
     let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-i"])
+    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "2", "-skip_frame", "nokey", "-i"])
         .arg(clip)
         .args(["-an", "-sn", "-dn", "-vf", "fps=1/4,scale=1920:1080,format=bgr24", "-frames:v", &n.to_string(), "-f", "rawvideo", "-"])
         .stdin(Stdio::null())

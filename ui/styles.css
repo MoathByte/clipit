@@ -198,6 +198,16 @@ h3 { font-weight: 500; }
 .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity .25s; }
 .thumb.loaded img { opacity: 1; }
 .thumb .badge { position: absolute; right: 8px; bottom: 8px; font-size: 11px; font-weight: 500; padding: 2px 6px; border-radius: 4px; background: rgba(0,0,0,.72); font-variant-numeric: tabular-nums; }
+/* clip still being worked on after saving */
+.thumb.busy img { filter: brightness(.45) saturate(.6); }
+.thumb.busy .play { display: none; }
+.thumb .busy-badge { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; padding: 3px 8px 3px 6px; border-radius: 999px; background: rgba(0,0,0,.72); color: #fff; pointer-events: none; }
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid rgba(255,255,255,.28); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.busy-cover { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #000; border-radius: 10px; color: #fff; text-align: center; padding: 16px; z-index: 2; }
+.busy-cover .spin { width: 34px; height: 34px; border-width: 3px; }
+.busy-cover .busy-title { font-size: 15px; font-weight: 600; }
+.busy-cover .busy-sub { font-size: 12.5px; color: rgba(255,255,255,.65); }
 .thumb .kills-badge { position: absolute; left: 8px; bottom: 8px; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: var(--accent); color: var(--accent-ink); font-variant-numeric: tabular-nums; }
 .thumb .play { position: absolute; inset: 0; display: grid; place-items: center; opacity: 0; transition: opacity .15s; background: rgba(0,0,0,.25); }
 .thumb .play svg { width: 44px; height: 44px; fill: #fff; stroke: none; filter: drop-shadow(0 2px 8px rgba(0,0,0,.6)); }
@@ -801,3 +811,7 @@ body.reduce-motion .nav-item:hover:not(.active) { padding-left: 10px; }
   .main.page-in > *, .set-pane.enter, .modal, .modal .modal-card, .whats-new li, .notice, .menu, .toast { animation: none !important; }
   .btn:hover, .btn:active, .clip:hover .thumb, .game-tile:hover, .set-tab:hover, .nav-add:hover, .set-tab:hover .tile, .set-tab.on .tile { transform: none !important; }
 }
+
+/* Spinners show work in progress: they keep turning (slowly) with reduced motion. */
+body.reduce-motion .spin { animation: spin 1.6s linear infinite !important; animation-duration: 1.6s !important; }
+@media (prefers-reduced-motion: reduce) { .spin { animation: spin 1.6s linear infinite !important; } }
