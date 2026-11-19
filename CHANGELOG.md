@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.16.1
+
+### New
+- **Any clip length.** Settings > Recording > Replay length has a **Custom** option: type the seconds you want, like
+  45, anywhere from 10 seconds to 20 minutes. The RAM estimate and the Save button follow it.
+
+### Calmer
+- **Pages no longer re-animate every time you click.** The fade-in plays once when you go to another section (like
+  Clips to Settings). Switching Settings tabs, changing a setting, filtering, a new clip arriving, or going from one
+  game to another just updates in place. The fade itself is shorter and softer.
+- The Settings tab icons no longer tilt on hover.
+
+### Fixed
+- The speed slider stayed open after closing a clip, and was already open on the next one.
+
 ## 0.16.0
 
 ### New look

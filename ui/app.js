@@ -198,6 +198,9 @@ function go(view, opts = {}) {
     if (navStack.length > 50) navStack.shift();
   }
   if (!sameView(state.view, view)) { sel.paths.clear(); sel.anchor = null; }
+  // Only a move to another section animates (Home -> Settings, Clips -> a game). Moving within
+  // one (game to game, folder to folder) and re-opening the same page just switch.
+  const major = !state.view || state.view.name !== view.name;
   state.view = view;
   state.search = "";
   state.filterMap = state.filterAgent = "";
@@ -206,7 +209,7 @@ function go(view, opts = {}) {
   render();
   syncSelection();
   if (opts.back && opts.scroll) requestAnimationFrame(() => (main.scrollTop = opts.scroll));
-  animatePage();
+  if (major) animatePage();
   updateBackBtn();
 }
 
@@ -233,7 +236,7 @@ function render() {
 
 function emptyHint() {
   const c = (state.config && state.config.capture) || {};
-  if (c.enabled && c.clip_hotkey) return `Press <kbd>${esc(fmtKey(c.clip_hotkey))}</kbd> in a game to save the last ${esc(LENGTHS.find((l) => l[0] === c.replay_secs)?.[1] || "moments")}. Clips show up here right away.`;
+  if (c.enabled && c.clip_hotkey) return `Press <kbd>${esc(fmtKey(c.clip_hotkey))}</kbd> in a game to save the last ${esc(c.replay_secs ? fmtLen(c.replay_secs) : "moments")}. Clips show up here right away.`;
   return "Clips in your clips folder show up here. Turn on instant replay in Settings to start saving your own.";
 }
 
@@ -885,11 +888,14 @@ window.addEventListener("keydown", (e) => {
   }
 }, true);
 
-// Pages slide in (unless motion is reduced).
+// Pages fade in once when you move to another section (unless motion is reduced). The class is
+// taken off right after, so re-drawing the page (a toggle, a filter, a new clip) never replays it.
 function animatePage(el = main) {
+  clearTimeout(el._pageInTimer);
   el.classList.remove("page-in");
   void el.offsetWidth;
   el.classList.add("page-in");
+  el._pageInTimer = setTimeout(() => el.classList.remove("page-in"), 400);
 }
 
 // ---------- favorites ----------
@@ -1674,6 +1680,7 @@ function releaseVideo() {
 
 function closePlayer() {
   queueMicrotask(updateBackBtn);
+  openSpeedPop(false);
   const review = state.player && state.player.review;
   if (review) {
     const { kept, deleted, skipped, freed } = review;
@@ -2422,6 +2429,25 @@ let APP_VERSION = ""; // from the app (see init)
 const RES_OPTIONS = [["native", "Native"], ["1440", "1440p"], ["1080", "1080p"], ["720", "720p"]];
 const FPS_OPTIONS = [30, 60, 120, 144];
 const LENGTHS = [[15, "15 s"], [30, "30 s"], [60, "1 min"], [120, "2 min"], [180, "3 min"], [300, "5 min"], [600, "10 min"]];
+const LEN_MIN = 10, LEN_MAX = 1200;
+// "45 s", "1 min", "1 min 30 s", "20 min".
+function fmtLen(secs) {
+  const known = LENGTHS.find((l) => l[0] === secs);
+  if (known) return known[1];
+  const m = Math.floor(secs / 60), r = secs % 60;
+  return m ? (r ? `${m} min ${r} s` : `${m} min`) : `${r} s`;
+}
+const LEN_PRESETS = [30, 60, 120, 180, 300];
+// Replay length: presets plus Custom, which shows a seconds box (10 s to 20 min).
+function replayLenControl(secs) {
+  const custom = setUI.customLen || !LEN_PRESETS.includes(secs);
+  const btns = LEN_PRESETS.map((v) => `<button type="button" data-len="${v}" class="${!custom && v === secs ? "on" : ""}">${fmtLen(v)}</button>`).join("")
+    + `<button type="button" data-len="custom" class="${custom ? "on" : ""}">Custom</button>`;
+  const box = custom
+    ? `<label class="len-custom"><input type="number" id="set-len-custom" min="${LEN_MIN}" max="${LEN_MAX}" step="1" value="${secs}" aria-label="Replay length in seconds"><span>seconds</span></label>`
+    : "";
+  return `<div class="len-ctl"><div class="seg">${btns}</div>${box}</div>`;
+}
 
 // Encoders by what they run on, never by brand: "Graphics card", "Graphics card 2", "Processor".
 function encoderLabel(list, id) {
@@ -2559,6 +2585,7 @@ function startSettingsDraft() {
 const settingsDirty = () => !!(setUI.draft && JSON.stringify(setUI.draft) !== JSON.stringify(setUI.base));
 function dropSettingsDraft() {
   setUI.base = setUI.draft = null;
+  setUI.customLen = false;
   applySavedTheme();
 }
 
@@ -2709,7 +2736,7 @@ function settingsPane(tab) {
       ${group("Instant replay", [
         row("Instant replay", "Always keep the last moments ready to save.", toggle("capture.enabled")),
         row("Recorder", c.engine === "classic" ? "The older recorder, using ffmpeg. Use it only if the new one gives you trouble." : "Clipit's own engine: captures and encodes on your graphics card, saves clips instantly and starts recordings at once.", segB("capture.engine", [["native", "Clipit engine"], ["classic", "Classic"]])),
-        row("Replay length", "", segB("capture.replay_secs", LENGTHS.filter((l) => l[0] >= 30 && l[0] <= 300), true)),
+        row("Replay length", setUI.customLen || !LEN_PRESETS.includes(c.replay_secs) ? `Any length from ${LEN_MIN} s to ${LEN_MAX / 60} min. Clips save the last ${esc(fmtLen(c.replay_secs))}.` : "", replayLenControl(c.replay_secs)),
         row("Don't repeat footage", "Clip twice in a row and the second clip starts where the first one ended (at least 5 s), instead of saving the whole replay again.", toggle("capture.no_repeat")),
       ], { id: "ram-hint", text: esc(ramText(c)) })}
       ${group("What to capture", [
@@ -2770,7 +2797,7 @@ function settingsPane(tab) {
     const saved = state.config || {};
     return `<h2>Hotkeys</h2><p class="lede">They work everywhere, even in-game.</p>
       ${group("", [
-        row("Save clip", `Saves the last ${esc(LENGTHS.find((l) => l[0] === c.replay_secs)?.[1] || c.replay_secs + " s")}`, keyButton("capture.clip_hotkey", c.clip_hotkey) + keyErr(st.clip_hotkey, saved.capture && saved.capture.clip_hotkey)),
+        row("Save clip", `Saves the last ${esc(fmtLen(c.replay_secs))}`, keyButton("capture.clip_hotkey", c.clip_hotkey) + keyErr(st.clip_hotkey, saved.capture && saved.capture.clip_hotkey)),
         row("Start or stop recording", "Records until you press it again.", keyButton("capture.record_hotkey", c.record_hotkey) + keyErr(st.record_hotkey, saved.capture && saved.capture.record_hotkey)),
         row("Open quick view", "Pops Clipit over whatever you're doing.", keyButton("hotkey", d.hotkey) + keyErr(st.hotkey, saved.hotkey)),
       ], "Click a key, then press a key or a combination. Backspace clears it, Esc cancels.")}
@@ -3453,7 +3480,7 @@ function onDraftChange(path, value) {
 }
 
 function wireSettings() {
-  main.querySelectorAll(".set-tab").forEach((b) => (b.onclick = () => { setUI.tab = b.dataset.tab; renderSettings(); main.scrollTop = 0; animatePage($("#set-pane")); $("#set-pane").classList.add("enter"); }));
+  main.querySelectorAll(".set-tab").forEach((b) => (b.onclick = () => { setUI.tab = b.dataset.tab; renderSettings(); main.scrollTop = 0; }));
   main.querySelectorAll("[data-bind]").forEach((el) => {
     const path = el.dataset.bind;
     const read = () => (el.type === "checkbox" ? el.checked : el.dataset.num ? Number(el.value) : el.value);
@@ -3470,6 +3497,38 @@ function wireSettings() {
   main.querySelectorAll("[data-seg-bind]").forEach((g) => g.querySelectorAll("button").forEach((b) => (b.onclick = () => {
     onDraftChange(g.dataset.segBind, g.dataset.num ? Number(b.dataset.v) : b.dataset.v);
   })));
+  main.querySelectorAll("[data-len]").forEach((b) => (b.onclick = () => {
+    if (b.dataset.len === "custom") {
+      setUI.customLen = true;
+      rerenderSettings();
+      const box = $("#set-len-custom");
+      if (box) { box.focus(); box.select(); }
+      return;
+    }
+    setUI.customLen = false;
+    onDraftChange("capture.replay_secs", Number(b.dataset.len));
+  }));
+  const lenBox = $("#set-len-custom");
+  if (lenBox) {
+    // Typing only updates the save bar and RAM estimate; the page redraws once you leave the box or press Enter.
+    const typed = () => Math.round(Number(lenBox.value));
+    lenBox.addEventListener("input", () => {
+      const v = typed();
+      const ok = v >= LEN_MIN && v <= LEN_MAX;
+      lenBox.classList.toggle("bad", !ok);
+      if (!ok) return;
+      setPath(setUI.draft, "capture.replay_secs", v);
+      updateSaveBar();
+      const hint = $("#ram-hint");
+      if (hint) hint.textContent = ramText(setUI.draft.capture);
+    });
+    lenBox.addEventListener("change", () => {
+      const v = Math.min(LEN_MAX, Math.max(LEN_MIN, typed() || 60));
+      setUI.customLen = true;
+      onDraftChange("capture.replay_secs", v);
+    });
+    lenBox.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); lenBox.blur(); } });
+  }
   main.querySelectorAll("[data-theme-pick]").forEach((b) => (b.onclick = () => onDraftChange("theme", b.dataset.themePick)));
   main.querySelectorAll("[data-game-del]").forEach((b) => (b.onclick = () => {
     const games = setUI.draft.capture.games.filter((_, i) => i !== Number(b.dataset.gameDel));
@@ -3596,7 +3655,7 @@ function updateRecWidget() {
   const frac = rec ? 1 : ready ? secs / (c.replay_secs || 60) : 0;
   $("#rec-meter-fill").style.transform = `scaleX(${frac.toFixed(3)})`;
   $("#rec-meter").title = ready ? `${Math.round(secs)} of ${c.replay_secs} s in the buffer` : "";
-  const len = LENGTHS.find((l) => l[0] === c.replay_secs);
+  const len = c.replay_secs ? [c.replay_secs, fmtLen(c.replay_secs)] : null;
   $("#rec-save-label").textContent = len ? `Save ${len[1]}` : "Save clip";
   $("#rec-save").disabled = !ready && !rec;
   $("#rec-save").title = c.clip_hotkey ? `Save the last ${len ? len[1] : "moments"} (${fmtKey(c.clip_hotkey)})` : "Save the last moments as a clip";
@@ -4275,6 +4334,77 @@ async function runAutotest() {
     await wait(200);
     check("Esc closes the slider first", !speedPopOpen() && !!state.player);
     closePlayer();
+    log("DONE");
+    return;
+  }
+  // Calmer motion and custom replay length.
+  if (mode === "calm") {
+    const log = (m) => invoke("debug_log", { msg: m });
+    const check = (name, ok, extra = "") => log(`${ok ? "PASS" : "FAIL"} ${name}${extra ? " · " + extra : ""}`);
+    const anims = () => [...main.children].reduce((n, el) => n + el.getAnimations().filter((a) => a.playState === "running").length, 0);
+    go({ name: "all" });
+    await wait(1000);
+    go({ name: "settings" });
+    await wait(50);
+    check("moving to Settings animates once", main.classList.contains("page-in") && anims() > 0);
+    await wait(600);
+    check("animation class is cleared afterwards", !main.classList.contains("page-in"));
+    main.querySelector('.set-tab[data-tab="recording"]').click();
+    await wait(30);
+    check("Settings tab switch doesn't animate", anims() === 0 && !main.classList.contains("page-in"), anims() + " running");
+    const orig = state.config.capture.replay_secs;
+    const tgt = main.querySelector('[data-seg-bind="capture.target"] button:not(.on)');
+    tgt.click();
+    await wait(30);
+    check("changing a setting doesn't replay the page animation", anims() === 0, anims() + " running");
+    main.querySelector('[data-seg-bind="capture.target"] button:not(.on)').click();
+    await wait(30);
+    main.querySelector('[data-len="custom"]').click();
+    await wait(50);
+    const box = $("#set-len-custom");
+    check("Custom shows a seconds box, focused", !!box && document.activeElement === box);
+    box.value = "45";
+    box.dispatchEvent(new Event("input"));
+    check("typing keeps focus (no redraw)", document.activeElement === box && setUI.draft.capture.replay_secs === 45);
+    check("save bar shows", $("#save-bar").classList.contains("on"));
+    box.dispatchEvent(new Event("change"));
+    await wait(50);
+    check("45 s kept after redraw", $("#set-len-custom") && $("#set-len-custom").value === "45" && main.querySelector('[data-len="custom"]').classList.contains("on"));
+    check("row says 45 s", /Clips save the last 45 s/.test(main.textContent));
+    $("#set-len-custom").value = "5000";
+    $("#set-len-custom").dispatchEvent(new Event("input"));
+    check("out of range is flagged", $("#set-len-custom").classList.contains("bad"));
+    $("#set-len-custom").dispatchEvent(new Event("change"));
+    await wait(50);
+    check("out of range clamps to 20 min", setUI.draft.capture.replay_secs === 1200);
+    $("#set-len-custom").value = "45";
+    $("#set-len-custom").dispatchEvent(new Event("change"));
+    await wait(50);
+    await saveSettingsDraft();
+    await wait(500);
+    const cfg = await invoke("get_config");
+    check("saved: replay length 45 s", cfg.capture.replay_secs === 45, String(cfg.capture.replay_secs));
+    check("sidebar button says Save 45 s", /Save 45 s/.test($("#rec-save-label").textContent), $("#rec-save-label").textContent);
+    let st = null;
+    for (let i = 0; i < 8; i++) { await wait(1000); st = await invoke("capture_status"); log(`buffer ${st.state} ${st.buffered_secs.toFixed(1)}`); if (st.buffered_secs > 44) break; }
+    check("buffer fills to 45 s and stops there", st && st.buffered_secs <= 45.01, st ? st.state + " " + st.buffered_secs.toFixed(1) : "");
+    main.querySelector('[data-len="60"]').click();
+    await wait(50);
+    check("preset click leaves Custom", !$("#set-len-custom") && main.querySelector('[data-len="60"]').classList.contains("on"));
+    setUI.draft.capture.replay_secs = orig;
+    await saveSettingsDraft();
+    await wait(300);
+    log("restored replay length " + (await invoke("get_config")).capture.replay_secs);
+    const games = [...document.querySelectorAll(".nav-item[data-game]")].map((n) => n.dataset.game);
+    if (games.length >= 2) {
+      go({ name: "game", game: games[0] });
+      await wait(600);
+      go({ name: "game", game: games[1] });
+      await wait(30);
+      check("game to game doesn't animate", anims() === 0 && !main.classList.contains("page-in"));
+    }
+    go({ name: "all" });
+    await wait(600);
     log("DONE");
     return;
   }
