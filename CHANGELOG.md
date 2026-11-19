@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.15.0
+
+### New: Clipit's own recording engine
+- **Clips are recorded by Clipit itself now**, not by ffmpeg. A native engine (C++) captures the game with Windows'
+  capture, converts and scales on the graphics card, and encodes with your GPU's hardware encoder (NVIDIA, AMD or
+  Intel). Frames never leave the graphics card.
+- **Saving is instant.** The clip is written straight from memory, with no extra program started: a 25 s clip saves in
+  about a third of a second, three times faster than before.
+- **Never an old clip.** Frames keep coming at a steady rate even when the game doesn't draw (menus, loading
+  screens), so the buffer always reaches the moment you press. If capture ever gets stuck, the engine restarts on its
+  own within a few seconds **and keeps the replay buffer**, so a restart no longer means an empty clip.
+- **Lighter.** No ffmpeg running while you play: about 40% less memory in our tests.
+- Settings > Recording > Recorder lets you go back to the classic recorder. If the new engine fails three times in a
+  row, Clipit switches to the classic one by itself (until the next start) and tells you.
+- Long recordings (the Record button) and AV1 still use the classic recorder for now.
+
 ## 0.14.0
 
 ### New

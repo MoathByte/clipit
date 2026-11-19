@@ -16,7 +16,11 @@ pub mod game;
 pub mod handcam;
 pub mod killfeed;
 pub mod valorant;
+pub mod denoise;
+pub mod mp4;
 pub mod mux;
+pub mod native;
+pub mod packets;
 pub mod sound;
 pub mod ts;
 
@@ -125,15 +129,82 @@ struct Running {
     label: String,
     plan: Plan,
     key: String,
-    child: Child,
-    reader: Option<JoinHandle<()>>,
-    stderr: Arc<Mutex<String>>,
+    backend: Backend,
     audio_stop: Arc<AtomicBool>,
     audio_threads: Vec<JoinHandle<()>>,
-    /// Killfeed tap pipe + the thread reading it (VALORANT kill clips).
-    tap: Option<(String, JoinHandle<()>)>,
     /// Size of the recorded frames.
     size: (u32, u32),
+    started: Instant,
+}
+
+/// What does the capturing: Clipit's own engine, or the classic ffmpeg pipeline.
+enum Backend {
+    Classic {
+        child: Child,
+        reader: Option<JoinHandle<()>>,
+        stderr: Arc<Mutex<String>>,
+        /// Killfeed tap pipe + the thread reading it (VALORANT kill clips).
+        tap: Option<(String, JoinHandle<()>)>,
+    },
+    Native {
+        engine: native::Engine,
+        hevc: bool,
+        tap: Option<JoinHandle<()>>,
+    },
+}
+
+impl Running {
+    fn is_native(&self) -> bool {
+        matches!(self.backend, Backend::Native { .. })
+    }
+
+    /// Why it stopped working, if it did.
+    fn trouble(&mut self) -> Option<String> {
+        match &mut self.backend {
+            Backend::Classic { child, stderr, .. } => match child.try_wait() {
+                Ok(Some(_)) => Some(stderr.lock().unwrap().trim().lines().last().unwrap_or("The capture stopped unexpectedly").to_string()),
+                _ => None,
+            },
+            Backend::Native { engine, .. } => {
+                let s = engine.stats();
+                if s.failed {
+                    return Some(if s.error.is_empty() { "The new recorder stopped".into() } else { s.error });
+                }
+                // Watchdog: frames are paced even when the game doesn't draw, so no
+                // packets for a while means capture or the encoder is stuck.
+                let since = if s.last_packet_hns > 0 { now_hns() - s.last_packet_hns } else { 0 };
+                // (No frames from Windows at all, e.g. a minimized game, isn't the engine's fault.)
+                let stuck = self.started.elapsed() > Duration::from_secs(4) && s.captured > 0 && (s.encoded == 0 || since > NATIVE_STALL_HNS);
+                stuck.then(|| "The new recorder stopped receiving frames".to_string())
+            }
+        }
+    }
+}
+
+/// No packets for this long = the native engine is stuck: restart it (keeping the buffer).
+const NATIVE_STALL_HNS: i64 = 30_000_000;
+/// After this many failures in a row, use the classic recorder until Clipit restarts.
+const NATIVE_MAX_FAILURES: u32 = 3;
+
+/// A piece of the buffer, from whichever recorder made it.
+enum Snap {
+    Ts(ts::Snapshot),
+    Native(packets::Snapshot),
+}
+
+impl Snap {
+    fn start_hns(&self) -> i64 {
+        match self {
+            Snap::Ts(s) => s.start_hns(),
+            Snap::Native(s) => s.start_hns(),
+        }
+    }
+    fn end_hns(&self) -> i64 {
+        match self {
+            Snap::Ts(s) => s.end_hns(),
+            Snap::Native(s) => s.end_hns(),
+        }
+    }
 }
 
 /// The hand cam's ffmpeg (camera -> its own RAM buffer).
@@ -189,6 +260,15 @@ struct Shared {
     preview: Mutex<Option<(String, Vec<u8>)>>,
     /// QPC end of the last clip saved with the clip key (the next one starts there).
     last_clip_end: Mutex<Option<i64>>,
+    /// The native engine's buffer and how many seconds it keeps.
+    pring: Arc<Mutex<packets::Ring>>,
+    pkeep: Arc<AtomicU32>,
+    /// The native engine is the one running now.
+    native_on: AtomicBool,
+    /// Native failures in a row (reset after a good run).
+    native_failures: AtomicU32,
+    /// Seconds the audio buffers hold (kept across recorder restarts when unchanged).
+    audio_keep: AtomicU32,
     /// Your kills seen live in the killfeed (QPC, 100 ns). Only times, never video:
     /// a saved clip takes the ones inside it, the rest are dropped as they age.
     kill_log: Mutex<Vec<i64>>,
@@ -234,6 +314,11 @@ impl Engine {
             cam_hold: AtomicBool::new(false),
             preview: Mutex::new(None),
             last_clip_end: Mutex::new(None),
+            pring: Arc::new(Mutex::new(packets::Ring::default())),
+            pkeep: Arc::new(AtomicU32::new(62)),
+            native_on: AtomicBool::new(false),
+            native_failures: AtomicU32::new(0),
+            audio_keep: AtomicU32::new(0),
             kill_log: Mutex::new(Vec::new()),
             kill_watch_since: Mutex::new(None),
             warned_lag: AtomicBool::new(false),
@@ -531,25 +616,35 @@ impl Engine {
 
             // Did the encoder die?
             if let Some(r) = run.as_mut() {
-                if let Ok(Some(_)) = r.child.try_wait() {
-                    let err = r.stderr.lock().unwrap().trim().to_string();
+                if let Some(msg) = r.trouble() {
                     let game_gone = matches!(r.source, Source::Window(h) if !game::alive(h));
                     let r = run.take().unwrap();
+                    let was_native = r.is_native();
                     drop(run);
                     self.stop_recording();
                     stop_running(r);
+                    self.s.native_on.store(false, Ordering::SeqCst);
+                    if was_native && !game_gone {
+                        // Restart right away: the buffer is kept, so a clip still has what came before.
+                        self.native_failed(&msg);
+                        backoff_until = Instant::now() + Duration::from_millis(300);
+                        continue;
+                    }
                     if !game_gone {
                         failures += 1;
                         backoff_until = Instant::now() + Duration::from_secs(if failures > 3 { 30 } else { 2 });
-                        let msg = err.lines().last().unwrap_or("The capture stopped unexpectedly").to_string();
                         self.set_status("error", &format!("Capture stopped: {msg}"), None);
                     }
                     continue;
                 }
+                // A good native run clears the failure count.
+                if r.is_native() && r.started.elapsed() > Duration::from_secs(60) {
+                    self.s.native_failures.store(0, Ordering::SeqCst);
+                }
             }
 
             let desired = if want { self.desired_source(&cfg, run.as_ref()) } else { None };
-            let key = pipeline_key(&cfg);
+            let key = format!("{}|{}", pipeline_key(&cfg), if self.use_native(&cfg) { "native" } else { "classic" });
             let keep = match (run.as_ref(), desired.as_ref()) {
                 (Some(r), Some((src, _, _))) => r.source == *src && r.key == key,
                 _ => false,
@@ -565,10 +660,20 @@ impl Engine {
             if run.is_none() {
                 match desired {
                     Some((src, label, game)) if Instant::now() >= backoff_until => {
-                        match self.start_running(&ffmpeg, &cfg, src, label, game, key) {
+                        let native = self.use_native(&cfg);
+                        let started = if native { self.start_native(&cfg, src, label, game, key) } else { self.start_running(&ffmpeg, &cfg, src, label, game, key) };
+                        match started {
                             Ok(r) => {
+                                self.s.native_on.store(r.is_native(), Ordering::SeqCst);
                                 *run = Some(r);
                                 failures = 0;
+                            }
+                            Err(e) if native => {
+                                // Couldn't start the new recorder: count it and try again (or fall back).
+                                drop(run);
+                                self.native_failed(&e);
+                                backoff_until = Instant::now() + Duration::from_secs(1);
+                                continue;
                             }
                             Err(e) => {
                                 failures += 1;
@@ -592,10 +697,14 @@ impl Engine {
                 }
             }
             if let Some(r) = run.as_ref() {
-                let ring = self.s.ring.lock().unwrap();
-                let secs = ring.buffered_secs();
-                let ram = ring.bytes() + self.s.desktop.lock().unwrap().bytes() + self.s.mic.lock().unwrap().bytes();
-                drop(ring);
+                let (secs, video_bytes) = if r.is_native() {
+                    let ring = self.s.pring.lock().unwrap();
+                    (ring.buffered_secs(), ring.bytes())
+                } else {
+                    let ring = self.s.ring.lock().unwrap();
+                    (ring.buffered_secs(), ring.bytes())
+                };
+                let ram = video_bytes + self.s.desktop.lock().unwrap().bytes() + self.s.mic.lock().unwrap().bytes();
                 let detail = format!(
                     "{} · {} fps · {} Mbps",
                     if r.plan.width > 0 { format!("{}×{}", r.plan.width, r.plan.height) } else { "native size".into() },
@@ -610,7 +719,10 @@ impl Engine {
                     state: if secs > 0.0 { "buffering" } else { "starting" }.into(),
                     message: format!("Capturing {}", r.label),
                     source: r.label.clone(),
-                    encoder: friendly_encoder(&r.plan.encoder),
+                    encoder: match &r.backend {
+                        Backend::Native { hevc, .. } => format!("Graphics card · {} · Clipit engine", if *hevc { "HEVC" } else { "H.264" }),
+                        Backend::Classic { .. } => format!("{} · classic", friendly_encoder(&r.plan.encoder)),
+                    },
                     detail,
                     buffered_secs: secs.min(cfg.replay_secs as f64),
                     ram_bytes: (ram + self.s.cam_ring.lock().unwrap().bytes()) as u64,
@@ -761,12 +873,162 @@ impl Engine {
             let src = source.clone();
             let t = std::thread::Builder::new()
                 .name("capture-killfeed".into())
-                .spawn(move || engine.watch_kills(pipe, src))
+                .spawn(move || {
+                    let Ok(mut tap) = pipe.connect_reader() else { return };
+                    engine.watch_kills(&mut |frame: &mut Vec<u8>| tap.read_exact(frame).is_ok(), src)
+                })
                 .expect("killfeed thread");
             (name, t)
         });
+        // The classic recorder has its own buffer; the native one's is stale after it.
+        self.s.pring.lock().unwrap().clear();
+        self.s.audio_keep.store(0, Ordering::SeqCst);
         let size = if plan.width > 0 { (plan.width, plan.height) } else { (w, h) };
-        Ok(Running { source, game, label, plan, key, child, reader: Some(reader), stderr: stderr_buf, audio_stop, audio_threads, tap, size })
+        Ok(Running { source, game, label, plan, key, backend: Backend::Classic { child, reader: Some(reader), stderr: stderr_buf, tap }, audio_stop, audio_threads, size, started: Instant::now() })
+    }
+
+    // ---------- the native engine ----------
+
+    /// Whether to record with Clipit's own engine now. Long recordings and AV1
+    /// still use the classic recorder (for now).
+    fn use_native(&self, cfg: &Capture) -> bool {
+        cfg.engine == "native"
+            && cfg.codec != "av1"
+            && !self.is_recording()
+            && !self.s.want_record.load(Ordering::SeqCst)
+            && self.s.native_failures.load(Ordering::SeqCst) < NATIVE_MAX_FAILURES
+    }
+
+    fn native_failed(&self, why: &str) {
+        let n = self.s.native_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        eprintln!("[native] failure {n}: {why}");
+        if n == NATIVE_MAX_FAILURES {
+            (self.s.events)(Event::Warning(format!(
+                "Clipit's new recorder didn't work on this PC ({why}). It switched to the classic recorder for now; it tries the new one again next time Clipit starts."
+            )));
+        }
+    }
+
+    fn start_native(&self, cfg: &Capture, source: Source, label: String, game: Option<(String, String)>, key: String) -> Result<Running, String> {
+        let hevc = cfg.codec == "hevc";
+        // The ffmpeg encoder name is still used for the hand cam and exports.
+        let enc = encoder::pick(&self.encoders(), &cfg.codec, &cfg.encoder).unwrap_or_else(|| if hevc { "hevc_nvenc".into() } else { "h264_nvenc".into() });
+        let (w, h) = match &source {
+            Source::Window(hwnd) => game::client_size(*hwnd),
+            Source::Monitor(m) => game::monitors().iter().find(|x| x.handle == *m).map(|x| (x.width as u32, x.height as u32)).unwrap_or((1920, 1080)),
+        };
+        if w < 64 || h < 64 {
+            return Err("The game window is too small (minimized?)".into());
+        }
+        let plan = encoder::plan(cfg, w, h, &enc);
+        let (ow, oh) = if plan.width > 0 { (plan.width, plan.height) } else { (w & !1, h & !1) };
+        let watch_kills = cfg.enabled
+            && (cfg.auto_clip_kills || cfg.count_kills)
+            && match (&source, &game) {
+                (Source::Window(_), Some((exe, _))) => exe == killfeed::VALORANT_EXE,
+                (Source::Monitor(_), _) => true,
+                _ => false,
+            };
+        let kill_keep = {
+            let clip = (cfg.auto_max_mb as f64 * 8_000.0 / plan.kbps.max(1000) as f64).min(cfg.kill_before_secs as f64 + killfeed::MAX_ROUND_SECS + cfg.kill_after_secs as f64);
+            (clip + killfeed::ROUND_GAP_SECS + 5.0).ceil() as u32
+        };
+        self.s.kill_keep.store(if watch_kills { kill_keep } else { 0 }, Ordering::SeqCst);
+        let keep = self.s.keep_secs.load(Ordering::SeqCst).max(self.s.kill_keep.load(Ordering::SeqCst));
+        self.s.pkeep.store(keep + 2, Ordering::SeqCst);
+        let max_bytes = (encoder::buffer_bytes(plan.max_kbps, keep + 4) as f64 * 1.2) as usize;
+        {
+            // Same format and recent: keep what's buffered (a restart doesn't lose the replay).
+            let mut ring = self.s.pring.lock().unwrap();
+            ring.set_format(packets::Format { codec: hevc as u32, width: ow, height: oh, fps: plan.fps });
+            if ring.newest_hns().map_or(true, |t| now_hns() - t > 50_000_000) {
+                ring.clear();
+            }
+        }
+        // Audio buffers: kept across restarts unless their length changes.
+        if self.s.audio_keep.swap(keep, Ordering::SeqCst) != keep {
+            *self.s.desktop.lock().unwrap() = PcmRing::new(keep as f64 + 5.0);
+            *self.s.mic.lock().unwrap() = PcmRing::new(keep as f64 + 5.0);
+        }
+        let (tap_tx, tap_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(4);
+        let (hwnd, hmon) = match &source {
+            Source::Window(h) => (*h, 0),
+            Source::Monitor(m) => (0, *m),
+        };
+        let tap_every = (plan.fps / 4).max(1);
+        let engine = native::Engine::start(
+            native::Options {
+                hwnd,
+                hmonitor: hmon,
+                width: ow,
+                height: oh,
+                fps: plan.fps,
+                kbps: plan.kbps,
+                max_kbps: plan.max_kbps,
+                hevc,
+                cursor: cfg.cursor,
+                tap: watch_kills.then(|| (encoder::TAP_W as u32, encoder::TAP_H as u32, tap_every, tap_tx)),
+            },
+            self.s.pring.clone(),
+            self.s.pkeep.clone(),
+            max_bytes,
+        )?;
+        #[cfg(debug_assertions)]
+        println!("[native] {} {}x{} @ {} fps, {} kbps", engine.stats().encoder, ow, oh, plan.fps, plan.kbps);
+        let audio_stop = Arc::new(AtomicBool::new(false));
+        let mut audio_threads = Vec::new();
+        if cfg.desktop_audio {
+            audio_threads.push(audio::spawn(audio::Source::Desktop, cfg.desktop_device.clone(), self.s.desktop.clone(), audio_stop.clone()));
+        }
+        if cfg.mic {
+            audio_threads.push(audio::spawn(audio::Source::Mic, cfg.mic_device.clone(), self.s.mic.clone(), audio_stop.clone()));
+        }
+        let tap = watch_kills.then(|| {
+            let me = self.clone();
+            let src = source.clone();
+            std::thread::Builder::new()
+                .name("capture-killfeed".into())
+                .spawn(move || {
+                    me.watch_kills(
+                        &mut |frame: &mut Vec<u8>| match tap_rx.recv() {
+                            Ok(f) if f.len() == frame.len() => {
+                                *frame = f;
+                                true
+                            }
+                            Ok(_) => true,
+                            Err(_) => false,
+                        },
+                        src,
+                    )
+                })
+                .expect("killfeed thread")
+        });
+        Ok(Running { source, game, label, plan, key, backend: Backend::Native { engine, hevc, tap }, audio_stop, audio_threads, size: (ow, oh), started: Instant::now() })
+    }
+
+    // The newest moment in whichever buffer is in use.
+    fn buffer_newest(&self) -> Option<i64> {
+        if self.s.native_on.load(Ordering::SeqCst) {
+            self.s.pring.lock().unwrap().newest_hns()
+        } else {
+            self.s.ring.lock().unwrap().newest_hns()
+        }
+    }
+
+    fn buffer_since(&self, secs: f64, floor: Option<i64>) -> Option<Snap> {
+        if self.s.native_on.load(Ordering::SeqCst) {
+            self.s.pring.lock().unwrap().snapshot_since(secs, floor).map(Snap::Native)
+        } else {
+            self.s.ring.lock().unwrap().snapshot_since(secs, floor).map(Snap::Ts)
+        }
+    }
+
+    fn buffer_range(&self, start: i64, end: i64) -> Option<Snap> {
+        if self.s.native_on.load(Ordering::SeqCst) {
+            self.s.pring.lock().unwrap().snapshot_range(start, end).map(Snap::Native)
+        } else {
+            self.s.ring.lock().unwrap().snapshot_range(start, end).map(Snap::Ts)
+        }
     }
 
     fn set_status(&self, state: &str, message: &str, rec: Option<RecordingStatus>) {
@@ -830,7 +1092,7 @@ impl Engine {
         if !cfg.enabled && !self.is_recording() {
             return Err("Instant replay is off.".into());
         }
-        if self.s.ring.lock().unwrap().newest_hns().is_none() {
+        if self.buffer_newest().is_none() {
             return Err("Nothing recorded yet — try again in a second.".into());
         }
         let me = self.clone();
@@ -840,7 +1102,7 @@ impl Engine {
             // so the clip always ends where you pressed.
             let deadline = Instant::now() + Duration::from_millis(MAX_CATCH_UP_MS);
             let behind = loop {
-                let newest = me.s.ring.lock().unwrap().newest_hns().unwrap_or(0);
+                let newest = me.buffer_newest().unwrap_or(0);
                 let behind = pressed - newest;
                 if behind <= CAUGHT_UP_HNS || Instant::now() >= deadline {
                     break behind;
@@ -856,14 +1118,13 @@ impl Engine {
                 )));
             }
             let snap = {
-                let ring = me.s.ring.lock().unwrap();
                 let mut last = me.s.last_clip_end.lock().unwrap();
                 // Start where the previous clip ended (but keep at least MIN_CLIP_SECS).
-                let floor = match (cfg.no_repeat, *last, ring.newest_hns()) {
+                let floor = match (cfg.no_repeat, *last, me.buffer_newest()) {
                     (true, Some(end), Some(newest)) => Some(end.min(newest - (MIN_CLIP_SECS * 1e7) as i64)),
                     _ => None,
                 };
-                let snap = ring.snapshot_since(cfg.replay_secs as f64, floor);
+                let snap = me.buffer_since(cfg.replay_secs as f64, floor);
                 if let Some(sn) = &snap {
                     *last = Some(sn.end_hns());
                 }
@@ -882,11 +1143,11 @@ impl Engine {
 
     /// Saves a round of kills: from `start_hns` to `end_hns` on the capture clock.
     fn save_round(&self, start_hns: i64, end_hns: i64, kills: u32) -> Result<(), String> {
-        let snap = self.s.ring.lock().unwrap().snapshot_range(start_hns, end_hns).ok_or("Nothing recorded yet.")?;
+        let snap = self.buffer_range(start_hns, end_hns).ok_or("Nothing recorded yet.")?;
         self.save_snapshot(snap, Some(kills))
     }
 
-    fn save_snapshot(&self, snap: ts::Snapshot, kills: Option<u32>) -> Result<(), String> {
+    fn save_snapshot(&self, snap: Snap, kills: Option<u32>) -> Result<(), String> {
         let cfg = self.s.cfg.lock().unwrap().clone();
         let ffmpeg = self.s.ffmpeg.clone().ok_or("ffmpeg isn't installed")?;
         let video = self.s.run.lock().unwrap().as_ref().map(|r| VideoInfo::of(r)).ok_or("Capture isn't running.")?;
@@ -895,7 +1156,6 @@ impl Engine {
         let opts = Self::audio_opts(&cfg);
         let d = opts.desktop.then(|| self.s.desktop.lock().unwrap().read(start, end));
         let m = opts.mic.then(|| self.s.mic.lock().unwrap().read(start, end));
-        let pcm = mux::interleave(d.as_deref(), m.as_deref());
         let name = self.current_game_name();
         let root = self.s.clips_root.lock().unwrap().clone();
         let out = clip_path(Path::new(&root), &name, ".mp4")?;
@@ -915,9 +1175,12 @@ impl Engine {
             // The clip is saved right away, as without a hand cam.
             #[cfg(debug_assertions)]
             let t0 = Instant::now();
-            let res = mux::save_clip(&ffmpeg, &snap, pcm, &opts, fps, &out, &|c| shared.job.add(c));
+            let res = match &snap {
+                Snap::Ts(s) => mux::save_clip(&ffmpeg, s, mux::interleave(d.as_deref(), m.as_deref()), &opts, fps, &out, &|c| shared.job.add(c)),
+                Snap::Native(s) => save_native(s, d, m, &opts, &out),
+            };
             #[cfg(debug_assertions)]
-            println!("[clip] ffmpeg wrote the clip in {:?}", t0.elapsed());
+            println!("[clip] wrote the clip in {:?}", t0.elapsed());
             drop(snap);
             let saved = res.is_ok();
             // Marked before "saved" goes out, so the clip never shows up as ready
@@ -976,14 +1239,14 @@ impl Engine {
     /// first kill to `kill_after_secs` after your last. A round is over once no kill
     /// has happened for ROUND_GAP_SECS — longer than a round's end plus buy phase can
     /// be, so an ace stays in one clip, and two rounds never merge.
-    fn watch_kills(&self, pipe: mux::Pipe, source: Source) {
-        let Ok(mut tap) = pipe.connect_reader() else { return };
+    /// `next_frame` fills in the next tap frame; false = the capture stopped.
+    fn watch_kills(&self, next_frame: &mut dyn FnMut(&mut Vec<u8>) -> bool, source: Source) {
         let mut frame = vec![0u8; encoder::TAP_W * encoder::TAP_H * 3];
         let mut tracker = killfeed::Tracker::new();
         let mut round = killfeed::Round::default();
         // Foreground window and whether it's VALORANT (looked up once per window).
         let mut front: (isize, bool) = (0, false);
-        while tap.read_exact(&mut frame).is_ok() {
+        while next_frame(&mut frame) {
             let (on, auto, rules) = {
                 let c = self.s.cfg.lock().unwrap();
                 (c.enabled && (c.auto_clip_kills || c.count_kills), c.enabled && c.auto_clip_kills, Self::kill_rules(&c))
@@ -1126,7 +1389,7 @@ impl Engine {
         self.s.want_record.store(true, Ordering::SeqCst);
         let t0 = Instant::now();
         let ready = loop {
-            let ok = self.s.run.lock().unwrap().is_some() && self.s.ring.lock().unwrap().header().is_some();
+            let ok = self.s.run.lock().unwrap().as_ref().is_some_and(|r| !r.is_native()) && self.s.ring.lock().unwrap().header().is_some();
             if ok {
                 break true;
             }
@@ -1458,20 +1721,101 @@ fn stop_cam(mut c: CamRun) {
     }
 }
 
-fn stop_running(mut r: Running) {
-    r.audio_stop.store(true, Ordering::SeqCst);
-    let _ = r.child.kill();
-    let _ = r.child.wait();
-    if let Some(t) = r.reader.take() {
+fn stop_running(r: Running) {
+    let Running { backend, audio_stop, audio_threads, .. } = r;
+    audio_stop.store(true, Ordering::SeqCst);
+    match backend {
+        Backend::Classic { mut child, reader, tap, .. } => {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Some(t) = reader {
+                let _ = t.join();
+            }
+            if let Some((name, t)) = tap {
+                mux::Pipe::poke_writer(&name); // in case ffmpeg never opened it
+                let _ = t.join();
+            }
+        }
+        Backend::Native { engine, tap, .. } => {
+            drop(engine); // stops capture; the tap channel closes with it
+            if let Some(t) = tap {
+                let _ = t.join();
+            }
+        }
+    }
+    for t in audio_threads {
         let _ = t.join();
     }
-    if let Some((name, t)) = r.tap.take() {
-        mux::Pipe::poke_writer(&name); // in case ffmpeg never opened it
-        let _ = t.join();
+}
+
+/// Writes a native-engine clip: MP4 straight from the buffer, audio encoded to
+/// AAC alongside (one thread per track). No ffmpeg, no new process.
+fn save_native(snap: &packets::Snapshot, desktop: Option<Vec<i16>>, mic: Option<Vec<i16>>, opts: &mux::AudioOpts, out: &Path) -> Result<u64, String> {
+    let tracks = native_tracks(desktop, mic, opts);
+    let jobs: Vec<_> = tracks
+        .into_iter()
+        .map(|(title, pcm)| {
+            std::thread::spawn(move || {
+                native::aac(&pcm, 2, audio::RATE as u32, 192).map(|a| mp4::AudioTrack { title: title.to_string(), rate: audio::RATE as u32, channels: 2, asc: a.asc, frames: a.frames, kbps: 192 })
+            })
+        })
+        .collect();
+    let mut audio_tracks = Vec::new();
+    for j in jobs {
+        audio_tracks.push(j.join().map_err(|_| "The audio encoder crashed".to_string())??);
     }
-    for t in r.audio_threads.drain(..) {
-        let _ = t.join();
+    let part = mux::part_path(out);
+    let size = mp4::write(&part, snap, &audio_tracks).inspect_err(|_| {
+        let _ = std::fs::remove_file(&part);
+    })?;
+    // Antivirus may hold a brand-new file for a moment.
+    mux::rename_retry(&part, out, Duration::from_secs(15)).map_err(|e| format!("Couldn't finish the clip: {e}"))?;
+    Ok(size)
+}
+
+/// The same tracks the classic recorder makes: "Game + mic" (mixed, limited),
+/// plus "Desktop" and "Microphone" on their own when asked for.
+fn native_tracks(desktop: Option<Vec<i16>>, mic: Option<Vec<i16>>, a: &mux::AudioOpts) -> Vec<(&'static str, Vec<i16>)> {
+    let scale = |v: &mut Vec<i16>, vol: u32| {
+        if vol != 100 {
+            let g = vol as f32 / 100.0;
+            v.iter_mut().for_each(|s| *s = (*s as f32 * g).clamp(-32768.0, 32767.0) as i16);
+        }
+    };
+    let d = desktop.map(|mut v| {
+        scale(&mut v, a.desktop_volume);
+        v
+    });
+    let m = mic.map(|mut v| {
+        if a.noise_suppression {
+            denoise::stereo(&mut v);
+        }
+        scale(&mut v, a.mic_volume);
+        v
+    });
+    match (d, m) {
+        (Some(d), Some(m)) => {
+            let n = d.len().min(m.len());
+            let mix: Vec<i16> = (0..n).map(|i| limit(d[i] as f32 + m[i] as f32)).collect();
+            if a.separate_tracks {
+                vec![("Game + mic", mix), ("Desktop", d), ("Microphone", m)]
+            } else {
+                vec![("Game + mic", mix)]
+            }
+        }
+        (Some(d), None) => vec![("Desktop", d)],
+        (None, Some(m)) => vec![("Microphone", m)],
+        (None, None) => Vec::new(),
     }
+}
+
+/// Soft limiter for the mix: untouched below 80 % of full scale, then eased
+/// towards 97 % (like the classic recorder's alimiter, without the lookahead).
+fn limit(x: f32) -> i16 {
+    const FS: f32 = 32767.0;
+    let a = x.abs() / FS;
+    let y = if a <= 0.8 { a } else { 0.8 + 0.17 * ((a - 0.8) / 0.17).tanh() };
+    (y * FS * x.signum()) as i16
 }
 
 fn game_allowed(cfg: &Capture, exe: &str, looks_like_game: bool) -> bool {
@@ -1694,14 +2038,18 @@ mod tests {
     #[test]
     #[ignore]
     fn replay_real() {
-        let dir = std::env::temp_dir().join(format!("clipit-rp-{}", std::process::id()));
+        // One engine per run (the recorder's supervisor lives until the process ends):
+        // CLIPIT_ENGINE=classic cargo test replay_real -- --ignored --nocapture
+        replay_real_with(&std::env::var("CLIPIT_ENGINE").unwrap_or_else(|_| "native".into()));
+    }
+
+    fn replay_real_with(engine_name: &str) {
+        let dir = std::env::temp_dir().join(format!("clipit-rp-{}-{engine_name}", std::process::id()));
         let mut cfg = Capture::default();
+        cfg.engine = engine_name.into();
         cfg.target = "monitor".into();
-        // CLIPIT_AUDIO=1: with desktop + mic audio on separate tracks.
-        let audio = std::env::var("CLIPIT_AUDIO").is_ok();
-        cfg.desktop_audio = audio;
-        cfg.mic = audio;
-        cfg.separate_tracks = audio;
+        cfg.desktop_audio = true;
+        cfg.mic = true;
         cfg.sounds = false;
         cfg.auto_clip_kills = false;
         cfg.count_kills = false;
@@ -1717,33 +2065,38 @@ mod tests {
             let _ = tx.lock().unwrap().send(msg);
         }));
         let t = Instant::now();
-        while engine.status().buffered_secs < 15.0 {
-            assert!(t.elapsed() < Duration::from_secs(40), "capture didn't start: {:?}", engine.status());
+        while engine.status().buffered_secs < 20.0 {
+            assert!(t.elapsed() < Duration::from_secs(60), "capture didn't start: {:?}", engine.status());
             std::thread::sleep(Duration::from_millis(200));
         }
-        let duration = |p: &str| -> f64 {
+        let st = engine.status();
+        let mut meter = crate::usage::Meter::default();
+        meter.read();
+        std::thread::sleep(Duration::from_secs(5));
+        let use_ = meter.read();
+        let probe = |p: &str| -> (f64, String) {
             let o = Command::new(&ffmpeg).args(["-hide_banner", "-i", p]).output().unwrap();
             let e = String::from_utf8_lossy(&o.stderr).to_string();
             let d = e.split("Duration: ").nth(1).unwrap().split(',').next().unwrap().to_string();
             let v: Vec<f64> = d.split(':').map(|x| x.parse().unwrap()).collect();
-            v[0] * 3600.0 + v[1] * 60.0 + v[2]
+            let streams = e.lines().filter(|l| l.contains("Stream #")).map(|l| l.trim().split(": ").nth(1).unwrap_or("").split(' ').next().unwrap_or("").to_string()).collect::<Vec<_>>().join("+");
+            (v[0] * 3600.0 + v[1] * 60.0 + v[2], streams)
         };
         let pressed = Instant::now();
         engine.save_replay().unwrap();
         let first = rx.recv_timeout(Duration::from_secs(30)).unwrap();
-        println!("first: {first} after {:?}", pressed.elapsed());
-        let first = first.strip_prefix("saved ").expect("saved").to_string();
-        let d1 = duration(&first);
-        std::thread::sleep(Duration::from_secs(8));
-        engine.save_replay().unwrap();
-        let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
-        let second = second.strip_prefix("saved ").expect("saved").to_string();
-        let d2 = duration(&second);
-        println!("durations: {d1:.2} s, then {d2:.2} s");
+        let took = pressed.elapsed();
+        let first = first.strip_prefix("saved ").unwrap_or_else(|| panic!("{first}")).to_string();
+        let (d1, streams) = probe(&first);
+        let o = Command::new(&ffmpeg).args(["-hide_banner", "-v", "error", "-i", &first, "-f", "null", "-"]).output().unwrap();
+        let errors = String::from_utf8_lossy(&o.stderr).lines().count();
+        let size = std::fs::metadata(&first).map(|m| m.len()).unwrap_or(0);
+        println!("[{engine_name}] {} | buffer {:.1}s | saved in {:?}: {:.2}s, {} MB, {streams}, decode errors {errors} | Clipit+children CPU {:.1}% RAM {} MB",
+            st.encoder, st.buffered_secs, took, d1, size / 1_000_000, use_.cpu, use_.ram / 1_048_576);
         engine.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(d1 > 14.0, "{d1}");
-        assert!(d2 > 7.5 && d2 < 10.5, "second clip should be ~8-9 s: {d2}");
+        assert!(d1 > 19.0, "{d1}");
+        assert_eq!(errors, 0);
     }
 
     /// CLIPIT_CAMERA="Iriun Webcam" cargo test handcam_real -- --ignored --nocapture

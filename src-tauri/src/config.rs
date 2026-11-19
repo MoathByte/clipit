@@ -103,6 +103,8 @@ pub struct Capture {
     /// Keep an instant-replay buffer running.
     pub enabled: bool,
     pub replay_secs: u32,
+    /// "native" (Clipit's own C++ engine) or "classic" (ffmpeg).
+    pub engine: String,
     /// A clip starts where the previous clip-key clip ended (never repeats footage).
     pub no_repeat: bool,
     /// "native", "1440", "1080" or "720" (height; never upscales).
@@ -238,6 +240,7 @@ impl Default for Capture {
         Self {
             enabled: true,
             replay_secs: 60,
+            engine: "native".into(),
             no_repeat: true,
             resolution: "1080".into(),
             fps: 60,

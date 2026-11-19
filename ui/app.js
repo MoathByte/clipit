@@ -2707,6 +2707,7 @@ function settingsPane(tab) {
       ${group("", [capStatusRow(state.capStatus)])}
       ${group("Instant replay", [
         row("Instant replay", "Always keep the last moments ready to save.", toggle("capture.enabled")),
+        row("Recorder", c.engine === "classic" ? "The older recorder, using ffmpeg. Use it only if the new one gives you trouble." : "Clipit's own engine: captures and encodes on your graphics card and saves clips instantly. Long recordings still use the classic recorder for now.", segB("capture.engine", [["native", "Clipit engine"], ["classic", "Classic"]])),
         row("Replay length", "", segB("capture.replay_secs", LENGTHS.filter((l) => l[0] >= 30 && l[0] <= 300), true)),
         row("Don't repeat footage", "Clip twice in a row and the second clip starts where the first one ended (at least 5 s), instead of saving the whole replay again.", toggle("capture.no_repeat")),
       ], { id: "ram-hint", text: esc(ramText(c)) })}
@@ -3181,6 +3182,19 @@ const upd = { checking: false, checked: false, available: null, installing: fals
 // Shown once, the first time Clipit opens after an update: sections of
 // [title, one line]. Keep it short and plain.
 const WHATS_NEW = {
+  "0.15.0": [
+    ["New", [
+      ["Clipit's own recording engine", "Clips are now recorded by Clipit itself on your graphics card, instead of a separate ffmpeg program."],
+    ]],
+    ["Faster and more reliable", [
+      ["Instant saves", "Clips are written straight from memory: about three times faster than before."],
+      ["Never an old clip", "The buffer always reaches the moment you press, even in menus. If capture gets stuck, it restarts on its own and keeps your replay."],
+      ["Lighter", "No ffmpeg running while you play: less memory and fewer moving parts."],
+    ]],
+    ["Good to know", [
+      ["Classic recorder", "Settings → Recording → Recorder switches back if you ever need it. Long recordings still use it for now."],
+    ]],
+  ],
   "0.13.0": [
     ["New", [
       ["Folders", "Press + next to Folders to make your own (\u201cFunny moments\u201d, \u201cClutches\u201d\u2026). Rename or delete them from the folder's page."],
@@ -3412,7 +3426,7 @@ function updateSaveBar() {
 }
 
 // Changes that add or remove rows rebuild the pane.
-const REBUILD = /^(capture\.handcam\.(enabled|device|shape|aspect|border|flip_h|flip_v|rotate)|window_mode|animation|theme_mode|capture\.(enabled|target|games_mode|codec|desktop_audio|mic|replay_secs|auto_clip_kills|auto_max_mb|auto_min_kills|auto_max_gap_secs|auto_whole_round_from|kill_before_secs|kill_after_secs|auto_skip_deathmatch|quality|fps|resolution))$/;
+const REBUILD = /^(capture\.handcam\.(enabled|device|shape|aspect|border|flip_h|flip_v|rotate)|window_mode|animation|theme_mode|capture\.(enabled|engine|target|games_mode|codec|desktop_audio|mic|replay_secs|auto_clip_kills|auto_max_mb|auto_min_kills|auto_max_gap_secs|auto_whole_round_from|kill_before_secs|kill_after_secs|auto_skip_deathmatch|quality|fps|resolution))$/;
 
 function onDraftChange(path, value) {
   setPath(setUI.draft, path, value);
