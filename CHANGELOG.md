@@ -15,6 +15,10 @@
   2 min), size and date. The VALORANT filters (map, agent, kills) now show in the VALORANT folder; to have them on
   every page, tick "VALORANT filters" in the menu or turn on Settings > General > VALORANT filters everywhere. It's
   remembered.
+- **Updates install themselves.** Clipit now looks for updates in the background (even while it's in the tray),
+  downloads them, and installs them the next time you're not playing or recording and Clipit is tucked away in the
+  tray. It restarts quietly in the tray, and "What's new" shows the next time you open it. On by default; turn it off
+  in Settings > About > Install updates automatically.
 - **A new first-time setup.** A welcome over drifting game covers and slow moving light, then a few short questions:
   what you'll use Clipit for (VALORANT, other games, recording sessions, or just your clip library), the look, how
   Clipit pops up (with live previews of each), hotkeys, sound, recording and whether it starts with Windows. Clipit

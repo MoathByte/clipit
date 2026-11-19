@@ -31,6 +31,9 @@ pub struct Config {
     pub theme: String,
     /// Look for a new version at start (installing always waits for you).
     pub auto_update: bool,
+    /// Download updates in the background and install them when it's safe (no game,
+    /// no recording, Clipit tucked away in the tray); Clipit restarts quietly in the tray.
+    pub auto_install_updates: bool,
     /// Fewer animations inside the app (Windows' "Animation effects" off counts too).
     pub reduce_motion: bool,
     /// Show the VALORANT filters (map, agent, kills) on every page, not just in the VALORANT folder.
@@ -93,6 +96,7 @@ impl Default for Config {
             theme_mode: "dark".into(),
             theme: "tally".into(),
             auto_update: true,
+            auto_install_updates: true,
             reduce_motion: false,
             valorant_filters: false,
             uses: Vec::new(),

@@ -214,7 +214,7 @@ fn idle_ms() -> u64 {
 }
 
 /// A game is running: in front, being captured, or being recorded.
-fn game_running(app: &AppHandle) -> bool {
+pub(crate) fn game_running(app: &AppHandle) -> bool {
     use crate::capture::game;
     if game::foreground().map(|w| game::looks_like_game(&w)).unwrap_or(false) {
         return true;

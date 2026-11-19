@@ -3005,7 +3005,8 @@ function settingsPane(tab) {
         ? `<button type="button" class="btn primary" id="upd-install" ${u.installing ? "disabled" : ""}>Update and restart</button>`
         : `<button type="button" class="btn" id="upd-check" ${u.checking ? "disabled" : ""}>Check for updates</button>`),
       u.available && u.available.notes ? `<div class="row stack"><div class="row-sub" style="white-space:pre-wrap">${esc(u.available.notes)}</div></div>` : "",
-      row("Check automatically", "Looks for a new version when Clipit starts. Installing always waits for you.", toggle("auto_update")),
+      row("Install updates automatically", "Downloads new versions in the background and installs them when you're not playing or recording and Clipit is in the tray. It restarts quietly in the tray; you'll see what's new next time you open it.", toggle("auto_install_updates")),
+      dv("auto_install_updates") ? "" : row("Check for updates", "Looks for a new version and shows it here. Installing waits for you.", toggle("auto_update")),
     ], "Updates come from github.com/MoathByte/clipit and are signed; Clipit only installs files signed by the project. A recording in progress is finished and saved first.")}
     ${group("", [row("Replay buffer", "Kept in RAM; clips are written once, front to back.", ""), row("VALORANT", "Kills are read from Clipit's own recording and saved clips, never from your screen or the game.", "")])}`;
 }
@@ -3389,6 +3390,7 @@ const WHATS_NEW = {
       ["Game art built in", "Covers and icons for 44 popular games show up on their own. No key needed."],
       ["Filter menu", "Sort any game's clips by length, size and date. VALORANT filters live in the VALORANT folder, or everywhere if you tick them."],
       ["Folder icons", "Folders without game art get a proper icon."],
+      ["Automatic updates", "Updates now install themselves while you're not playing, and Clipit restarts quietly in the tray."],
       ["New setup", "A quick welcome that tailors Clipit to how you'll use it. Settings → General → Run setup to try it."],
     ]],
     ["Feels better", [
@@ -3601,6 +3603,13 @@ async function installUpdate() {
     refreshUpdateUI();
   }
 }
+
+// Found by the background check (it runs even while Clipit is in the tray).
+listen("update-available", (e) => {
+  upd.available = e.payload;
+  upd.checked = true;
+  refreshUpdateUI();
+});
 
 listen("update-progress", (e) => {
   const { done, total } = e.payload || {};
@@ -4592,7 +4601,7 @@ listen("app-hidden", () => {
   loadCompress().then(compressNotice);
   updateBackBtn();
   // Look for a new version a little after start (installing always waits for you).
-  if (state.config && state.config.auto_update !== false) setTimeout(() => checkForUpdate(true), 20000);
+  // Updates are checked (and installed, if that's on) by Clipit in the background.
   runAutotest();
 })();
 

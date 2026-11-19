@@ -1182,7 +1182,7 @@ fn set_window_theme(app: AppHandle, dark: bool) {
 
 // ---------- updates (signed releases on GitHub) ----------
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct UpdateInfo {
     version: String,
     notes: Option<String>,
@@ -1231,6 +1231,77 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     }
     update.install(bytes).map_err(|e| e.to_string())?;
     app.restart();
+}
+
+// ---------- automatic updates ----------
+
+/// Marks a restart by the automatic updater, so the new version starts in the tray
+/// instead of popping its window up.
+fn update_marker(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("updated-in-background"))
+}
+
+/// Safe to install: no game, no recording, no export running, and Clipit's window
+/// put away in the tray.
+fn safe_to_update(app: &AppHandle) -> bool {
+    let Some(s) = app.try_state::<AppState>() else { return false };
+    MODE.load(Ordering::SeqCst) == 0 && !s.engine.is_recording() && !s.jobs.busy() && !idle::game_running(app)
+}
+
+/// Looks for a new version a minute after start and every few hours. With
+/// automatic installs on (the default), downloads it in the background and installs
+/// it the next time it's safe; the installer runs silently and restarts Clipit in the tray.
+fn start_auto_updates(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        use tauri_plugin_updater::UpdaterExt;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let mut announced: Option<String> = None;
+        loop {
+            let (check, install) = {
+                let s = app.state::<AppState>();
+                let c = s.config.lock().unwrap();
+                (c.auto_update || c.auto_install_updates, c.auto_install_updates)
+            };
+            if check {
+                let found = match app.updater() {
+                    Ok(u) => u.check().await.ok().flatten(),
+                    Err(_) => None,
+                };
+                if let Some(update) = found {
+                    if announced.as_deref() != Some(update.version.as_str()) {
+                        announced = Some(update.version.clone());
+                        let _ = app.emit("update-available", UpdateInfo { version: update.version.clone(), notes: update.body.clone() });
+                    }
+                    if install {
+                        if let Ok(bytes) = update.download(|_, _| {}, || {}).await {
+                            // Wait for a quiet moment (checked every 30 s) without a time limit.
+                            loop {
+                                let still_on = app.state::<AppState>().config.lock().unwrap().auto_install_updates;
+                                if !still_on {
+                                    break;
+                                }
+                                if safe_to_update(&app) {
+                                    if let Some(m) = update_marker(&app) {
+                                        let _ = std::fs::write(&m, &update.version);
+                                    }
+                                    app.state::<AppState>().engine.shutdown();
+                                    // Runs the installer and exits; the installer starts Clipit again.
+                                    if update.install(&bytes).is_err() {
+                                        if let Some(m) = update_marker(&app) {
+                                            let _ = std::fs::remove_file(m);
+                                        }
+                                        app.restart();
+                                    }
+                                }
+                                tokio::time::sleep(Duration::from_secs(30)).await;
+                            }
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(3 * 3600)).await;
+        }
+    });
 }
 
 /// Installs or updates ffmpeg with winget in a console window the user can watch.
@@ -1684,9 +1755,12 @@ fn main() {
                 let _ = keys_app.run_on_main_thread(move || on_role(&app, role));
             });
             apply_hotkeys(&handle, &handle.state::<AppState>());
+            start_auto_updates(handle.clone());
 
-            // Launched by Windows at sign-in: stay in the tray. Otherwise show the window.
-            let minimized = std::env::args().any(|a| a == "--minimized");
+            // Launched by Windows at sign-in, or restarted by an automatic update: stay in
+            // the tray. Otherwise show the window.
+            let after_update = update_marker(&handle).is_some_and(|m| std::fs::remove_file(m).is_ok());
+            let minimized = after_update || std::env::args().any(|a| a == "--minimized");
             if minimized {
                 // Nothing to show yet: free the WebView after a while like any hide.
                 schedule_deep_sleep(&handle);
