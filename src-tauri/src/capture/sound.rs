@@ -56,6 +56,23 @@ fn sound(cue: Cue) -> &'static [u8] {
     }
 }
 
+/// Plays a moment of silence so Windows has the sound device open before the
+/// first real chime (the first PlaySound is noticeably slower).
+pub fn warm() {
+    std::thread::spawn(|| {
+        for c in [Cue::Saved, Cue::RecordStart, Cue::RecordStop, Cue::Error] {
+            let _ = sound(c);
+        }
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
+            static SILENCE: OnceLock<Vec<u8>> = OnceLock::new();
+            let data = SILENCE.get_or_init(|| wav(&[(440.0, 0.02)], 0.0));
+            let _ = PlaySoundW(windows::core::PCWSTR(data.as_ptr() as *const u16), None, SND_MEMORY | SND_SYNC | SND_NODEFAULT);
+        }
+    });
+}
+
 pub fn play(cue: Cue) {
     #[cfg(windows)]
     unsafe {

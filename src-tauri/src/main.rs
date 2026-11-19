@@ -545,10 +545,12 @@ fn on_role(app: &AppHandle, role: usize) {
             // Off the main thread (hotkeys arrive there): a busy lock in the
             // recorder must never freeze the window or delay the next key.
             let (app, engine) = (app.clone(), state.engine.clone());
-            std::thread::spawn(move || {
-                if let Err(e) = engine.save_replay() {
-                    capture_error(&app, &cfg, &e);
-                }
+            std::thread::spawn(move || match engine.save_replay() {
+                // The chime goes with the key press; the file is written right after in
+                // the background (if that fails, the error sound plays instead).
+                Ok(()) if cfg.capture.sounds => capture::sound::play(capture::sound::Cue::Saved),
+                Ok(()) => {}
+                Err(e) => capture_error(&app, &cfg, &e),
             });
         }
         Some(2) => {
@@ -579,7 +581,8 @@ fn capture_event(app: &AppHandle, ev: capture::Event) {
     let cfg_now = state.config.lock().unwrap().clone();
     match ev {
         Event::ClipSaved { path, size, kills, kill_times } => {
-            if cfg_now.capture.sounds {
+            // Auto clips chime when saved; your own clips already did on the key press.
+            if cfg_now.capture.sounds && kills.is_some() {
                 capture::sound::play(capture::sound::Cue::Saved);
             }
             // `kills` is set for auto clips (the round's count); live kill times
@@ -1672,6 +1675,8 @@ fn main() {
             app.manage(Arc::new(idle::Worker::load(app.path().app_config_dir()?.join("compressed.json"))));
             idle::start(handle.clone());
 
+            // Open the sound device now, so the first chime isn't late.
+            capture::sound::warm();
             let keys_app = handle.clone();
             keys::init(move |role| {
                 // Back on the main thread, like the normal hotkeys.

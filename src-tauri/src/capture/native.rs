@@ -2,10 +2,10 @@
 //! The engine captures and encodes on the GPU and hands over encoded packets,
 //! which go straight into the packet buffer; killfeed tap frames go to a channel.
 
-use super::packets::{Packet, Ring};
+use super::packets::{Packet, RecMsg, Ring};
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 
 #[repr(C)]
@@ -50,8 +50,20 @@ struct CcEngine {
     _private: [u8; 0],
 }
 
+#[repr(C)]
+struct CcAac {
+    _private: [u8; 0],
+}
+
+/// Where a recording in progress takes its video packets from (None = not recording).
+pub type RecTee = Arc<Mutex<Option<Sender<RecMsg>>>>;
+
 #[cfg(windows)]
 extern "C" {
+    fn cc_aac_open(channels: u32, rate: u32, kbps: u32, asc: *mut u8, err: *mut c_char, errlen: usize) -> *mut CcAac;
+    fn cc_aac_push(a: *mut CcAac, pcm: *const i16, frames: usize, on_frame: extern "C" fn(*mut c_void, *const u8, usize, i64, i32), user: *mut c_void) -> i32;
+    fn cc_aac_finish(a: *mut CcAac, on_frame: extern "C" fn(*mut c_void, *const u8, usize, i64, i32), user: *mut c_void) -> i32;
+    fn cc_aac_close(a: *mut CcAac);
     fn cc_start(o: *const CcOptions, err: *mut c_char, errlen: usize) -> *mut CcEngine;
     fn cc_get_stats(e: *mut CcEngine, s: *mut CcStats);
     fn cc_stop(e: *mut CcEngine);
@@ -80,13 +92,19 @@ struct Ctx {
     keep_secs: Arc<AtomicU32>,
     max_bytes: usize,
     tap: Option<SyncSender<Vec<u8>>>,
+    rec: RecTee,
 }
 
 extern "C" fn on_packet(user: *mut c_void, data: *const u8, size: usize, t: i64, key: i32) {
     let ctx = unsafe { &*(user as *const Ctx) };
     let bytes = unsafe { std::slice::from_raw_parts(data, size) }.to_vec();
+    let p = Packet { t, key: key != 0, data: Arc::new(bytes) };
     let mut ring = ctx.ring.lock().unwrap();
-    ring.push(Packet { t, key: key != 0, data: Arc::new(bytes) });
+    if ring.push(p.clone()) {
+        if let Some(tx) = ctx.rec.lock().unwrap().as_ref() {
+            let _ = tx.send(RecMsg::Video(p));
+        }
+    }
     ring.trim(ctx.keep_secs.load(Ordering::Relaxed) as f64, ctx.max_bytes);
 }
 
@@ -137,14 +155,14 @@ pub struct Engine {
 unsafe impl Send for Engine {}
 
 impl Engine {
-    pub fn start(o: Options, ring: Arc<Mutex<Ring>>, keep_secs: Arc<AtomicU32>, max_bytes: usize) -> Result<Self, String> {
+    pub fn start(o: Options, ring: Arc<Mutex<Ring>>, keep_secs: Arc<AtomicU32>, max_bytes: usize, rec: RecTee) -> Result<Self, String> {
         #[cfg(windows)]
         {
             let (tap_w, tap_h, tap_every, tap_tx) = match o.tap {
                 Some((w, h, n, tx)) => (w, h, n, Some(tx)),
                 None => (0, 0, 0, None),
             };
-            let ctx = Box::into_raw(Box::new(Ctx { ring, keep_secs, max_bytes, tap: tap_tx }));
+            let ctx = Box::into_raw(Box::new(Ctx { ring, keep_secs, max_bytes, tap: tap_tx, rec }));
             let opts = CcOptions {
                 hwnd: o.hwnd,
                 hmonitor: o.hmonitor,
@@ -172,7 +190,7 @@ impl Engine {
         }
         #[cfg(not(windows))]
         {
-            let _ = (o, ring, keep_secs, max_bytes);
+            let _ = (o, ring, keep_secs, max_bytes, rec);
             Err("Only on Windows".into())
         }
     }
@@ -245,6 +263,63 @@ pub fn aac(pcm: &[i16], channels: u32, rate: u32, kbps: u32) -> Result<Aac, Stri
     }
 }
 
+/// A streaming AAC encoder (long recordings).
+pub struct AacStream {
+    ptr: *mut CcAac,
+    pub asc: [u8; 2],
+}
+
+// Used from one thread at a time.
+unsafe impl Send for AacStream {}
+
+impl AacStream {
+    pub fn open(channels: u32, rate: u32, kbps: u32) -> Result<Self, String> {
+        #[cfg(windows)]
+        {
+            let mut asc = [0u8; 2];
+            let mut err = [0 as c_char; 256];
+            let ptr = unsafe { cc_aac_open(channels, rate, kbps, asc.as_mut_ptr(), err.as_mut_ptr(), err.len()) };
+            if ptr.is_null() {
+                return Err(text(&err));
+            }
+            Ok(Self { ptr, asc })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (channels, rate, kbps);
+            Err("Only on Windows".into())
+        }
+    }
+
+    /// Interleaved stereo PCM in, finished AAC frames out.
+    pub fn push(&mut self, pcm: &[i16]) -> Result<Vec<Vec<u8>>, String> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        #[cfg(windows)]
+        if unsafe { cc_aac_push(self.ptr, pcm.as_ptr(), pcm.len() / 2, on_aac, &mut out as *mut _ as *mut c_void) } != 0 {
+            return Err("AAC encoding failed".into());
+        }
+        Ok(out)
+    }
+
+    pub fn finish(&mut self) -> Result<Vec<Vec<u8>>, String> {
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        #[cfg(windows)]
+        if unsafe { cc_aac_finish(self.ptr, on_aac, &mut out as *mut _ as *mut c_void) } != 0 {
+            return Err("AAC encoding failed".into());
+        }
+        Ok(out)
+    }
+}
+
+impl Drop for AacStream {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            cc_aac_close(self.ptr)
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +354,7 @@ mod tests {
             ring.clone(),
             Arc::new(AtomicU32::new(10)),
             usize::MAX,
+            Arc::new(Mutex::new(None)),
         )
         .unwrap();
         std::thread::sleep(std::time::Duration::from_secs(3));

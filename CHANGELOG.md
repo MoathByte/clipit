@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.16.0
+
+### New look
+- **Clipit has a new design**, inspired by BitChord's clean, Apple-Music-like style: neutral greys, the DM Sans
+  typeface, big bold page titles, a calm sidebar with coloured icons, pill-shaped buttons, iOS-style switches and
+  segmented controls, and settings in rounded grouped lists. Light mode follows the same look.
+- **The recorder is a floating pill** at the bottom of the window, like a music player's: replay status, Save clip and
+  Record are always one click away.
+
+### Fixed
+- **Recording works again.** "Capture didn't start, so recording couldn't begin" came from recordings still using the
+  old recorder, which had to start up from scratch. Recordings now run on Clipit's own engine: they start instantly
+  (the first second comes from the replay buffer), stop in a fraction of a second, and keep going if the engine has
+  to restart.
+- **The save chime plays the moment you press the key**, instead of after the clip is written. If saving then fails,
+  you hear the error sound.
+
 ## 0.15.0
 
 ### New: Clipit's own recording engine

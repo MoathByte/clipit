@@ -22,6 +22,14 @@ pub struct Format {
     pub fps: u32,
 }
 
+/// What a recording's writer receives.
+pub enum RecMsg {
+    Video(Packet),
+    /// (track, one AAC frame)
+    Audio(usize, Vec<u8>),
+    Stop,
+}
+
 #[derive(Default)]
 pub struct Ring {
     pub format: Format,
@@ -63,19 +71,29 @@ impl Ring {
         self.bytes = 0;
     }
 
-    pub fn push(&mut self, p: Packet) {
+    /// False when the packet was dropped.
+    pub fn push(&mut self, p: Packet) -> bool {
         // Nothing before the first keyframe is decodable.
         if self.packets.is_empty() && !p.key {
-            return;
+            return false;
         }
         // Time never runs backwards (a restarted encoder): drop the odd one.
         if let Some(last) = self.packets.back() {
             if p.t <= last.t {
-                return;
+                return false;
             }
         }
         self.bytes += p.data.len();
         self.packets.push_back(p);
+        true
+    }
+
+    /// From the newest keyframe on (a recording starts here).
+    pub fn from_last_key(&self) -> Vec<Packet> {
+        match self.packets.iter().rposition(|p| p.key) {
+            Some(i) => self.packets.iter().skip(i).cloned().collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Keeps at least `keep_secs` (whole keyframe intervals) and at most `max_bytes`.

@@ -61,18 +61,6 @@
         <span id="update-text">Update ready</span>
         <button class="btn sm primary" id="update-btn">Restart to update</button>
       </div>
-      <div class="recorder idle" id="rec-widget">
-        <div class="rec-head"><span class="rec-label" id="rec-text">Starting</span><span class="rec-src" id="rec-src"></span></div>
-        <div class="rec-meter" id="rec-meter" title=""><span id="rec-meter-fill"></span></div>
-        <div class="rec-actions">
-          <button class="btn sm" id="rec-save" title="Save the last moments as a clip">
-            <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg> <span id="rec-save-label">Save clip</span>
-          </button>
-          <button class="btn sm rec-btn" id="rec-toggle" title="Start or stop a recording">
-            <span class="rec-icon"></span> <span id="rec-toggle-label">Record</span>
-          </button>
-        </div>
-      </div>
       <div class="hotkey-hint" id="hotkey-chip"></div>
       <button class="nav-item" data-nav="settings">
         <svg viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -82,6 +70,22 @@
   </aside>
 
   <main class="main" id="main"></main>
+
+  <!-- The recorder, floating over the page -->
+  <div class="dock" id="dock">
+  <div class="recorder idle" id="rec-widget">
+    <div class="rec-head"><span class="rec-label" id="rec-text">Starting</span><span class="rec-src" id="rec-src"></span></div>
+    <div class="rec-meter" id="rec-meter" title=""><span id="rec-meter-fill"></span></div>
+    <div class="rec-actions">
+      <button class="btn sm" id="rec-save" title="Save the last moments as a clip">
+        <svg viewBox="0 0 24 24"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg> <span id="rec-save-label">Save clip</span>
+      </button>
+      <button class="btn sm rec-btn" id="rec-toggle" title="Start or stop a recording">
+        <span class="rec-icon"></span> <span id="rec-toggle-label">Record</span>
+      </button>
+    </div>
+  </div>
+  </div>
 
   <!-- Clip player -->
   <div class="player hidden" id="player" role="dialog" aria-modal="true">

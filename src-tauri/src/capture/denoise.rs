@@ -31,6 +31,43 @@ pub fn stereo(pcm: &mut [i16]) {
     }
 }
 
+/// The same, for audio that comes in pieces (a long recording). Pieces should
+/// be whole multiples of 480 frames; a shorter last piece is padded.
+pub struct Stream {
+    st: Box<DenoiseState<'static>>,
+    warm: bool,
+}
+
+impl Stream {
+    pub fn new() -> Self {
+        Self { st: DenoiseState::new(), warm: false }
+    }
+
+    pub fn process(&mut self, pcm: &mut [i16]) {
+        let n = DenoiseState::FRAME_SIZE;
+        let frames = pcm.len() / 2;
+        let mut input = vec![0f32; n];
+        let mut output = vec![0f32; n];
+        let mut pos = 0;
+        while pos < frames {
+            let len = n.min(frames - pos);
+            for i in 0..n {
+                input[i] = if i < len { (pcm[2 * (pos + i)] as f32 + pcm[2 * (pos + i) + 1] as f32) * 0.5 } else { 0.0 };
+            }
+            self.st.process_frame(&mut output, &input);
+            if self.warm {
+                for i in 0..len {
+                    let v = output[i].clamp(-32768.0, 32767.0) as i16;
+                    pcm[2 * (pos + i)] = v;
+                    pcm[2 * (pos + i) + 1] = v;
+                }
+            }
+            self.warm = true;
+            pos += len;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

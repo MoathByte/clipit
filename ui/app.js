@@ -278,6 +278,7 @@ function renderHome() {
   const earlier = recent.slice(1);
   main.innerHTML = `
     <div class="page home">
+      <h1 class="page-title">Home</h1>
       <section class="home-games" aria-label="Your games">
         <div class="section-label">Your games</div>
         <div class="game-strip">
@@ -2462,9 +2463,9 @@ const seg = (name, options, value) =>
 // ---------- themes ----------
 
 const THEMES = [
-  ["tally", "Tally", "Vermilion, like a camera's recording light", ["#ff5b37", "#f2a93b", "#8fae5d"], "#1b1a18"],
-  ["volt", "Volt", "Electric chartreuse with sun and coral", ["#c6f135", "#ffd23f", "#ff7a59"], "#191c16"],
-  ["bubblegum", "Bubblegum", "Pink with tangerine and lemon", ["#ff6fae", "#ffa04d", "#ffe066"], "#1d191b"],
+  ["tally", "Tally", "Red, like a camera's recording light", ["#fa4d3c", "#ff9f0a", "#30d158"], "#1f1f1f"],
+  ["volt", "Volt", "Electric chartreuse", ["#c6f135", "#ff9f0a", "#64d2ff"], "#1f1f1f"],
+  ["bubblegum", "Bubblegum", "Hot pink", ["#ff5c9d", "#ff9f0a", "#64d2ff"], "#1f1f1f"],
 ];
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 let shownTheme = null; // what's on screen (a settings/setup draft can preview another)
@@ -2707,7 +2708,7 @@ function settingsPane(tab) {
       ${group("", [capStatusRow(state.capStatus)])}
       ${group("Instant replay", [
         row("Instant replay", "Always keep the last moments ready to save.", toggle("capture.enabled")),
-        row("Recorder", c.engine === "classic" ? "The older recorder, using ffmpeg. Use it only if the new one gives you trouble." : "Clipit's own engine: captures and encodes on your graphics card and saves clips instantly. Long recordings still use the classic recorder for now.", segB("capture.engine", [["native", "Clipit engine"], ["classic", "Classic"]])),
+        row("Recorder", c.engine === "classic" ? "The older recorder, using ffmpeg. Use it only if the new one gives you trouble." : "Clipit's own engine: captures and encodes on your graphics card, saves clips instantly and starts recordings at once.", segB("capture.engine", [["native", "Clipit engine"], ["classic", "Classic"]])),
         row("Replay length", "", segB("capture.replay_secs", LENGTHS.filter((l) => l[0] >= 30 && l[0] <= 300), true)),
         row("Don't repeat footage", "Clip twice in a row and the second clip starts where the first one ended (at least 5 s), instead of saving the whole replay again.", toggle("capture.no_repeat")),
       ], { id: "ram-hint", text: esc(ramText(c)) })}
@@ -3182,6 +3183,16 @@ const upd = { checking: false, checked: false, available: null, installing: fals
 // Shown once, the first time Clipit opens after an update: sections of
 // [title, one line]. Keep it short and plain.
 const WHATS_NEW = {
+  "0.16.0": [
+    ["New look", [
+      ["A cleaner design", "Neutral colours, a new typeface, big page titles, pill buttons and iOS-style settings."],
+      ["Floating recorder", "Save clip and Record now sit in a pill at the bottom of the window."],
+    ]],
+    ["Fixed", [
+      ["Recording works again", "Recordings now use Clipit's own engine: they start instantly and never fail to begin."],
+      ["Instant chime", "The save sound plays the moment you press the key."],
+    ]],
+  ],
   "0.15.0": [
     ["New", [
       ["Clipit's own recording engine", "Clips are now recorded by Clipit itself on your graphics card, instead of a separate ffmpeg program."],

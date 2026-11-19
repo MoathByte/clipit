@@ -231,6 +231,17 @@ struct Recording {
     failed: Arc<AtomicBool>,
     /// Hand cam for this recording: its file + QPC time of its first frame.
     cam: Option<(PathBuf, Arc<AtomicI64>)>,
+    /// Recorded by the native engine (then `mux`, `video`, `audio` are unused).
+    native: Option<NativeRec>,
+}
+
+struct NativeRec {
+    part: PathBuf,
+    tx: std::sync::mpsc::Sender<packets::RecMsg>,
+    writer: JoinHandle<Result<u64, String>>,
+    audio: JoinHandle<()>,
+    /// Where the audio stops (the end of the last video frame), set when stopping.
+    end_hns: Arc<AtomicI64>,
 }
 
 struct Shared {
@@ -263,6 +274,8 @@ struct Shared {
     /// The native engine's buffer and how many seconds it keeps.
     pring: Arc<Mutex<packets::Ring>>,
     pkeep: Arc<AtomicU32>,
+    /// A native recording in progress takes video packets from here.
+    rec_tee: native::RecTee,
     /// The native engine is the one running now.
     native_on: AtomicBool,
     /// Native failures in a row (reset after a good run).
@@ -316,6 +329,7 @@ impl Engine {
             last_clip_end: Mutex::new(None),
             pring: Arc::new(Mutex::new(packets::Ring::default())),
             pkeep: Arc::new(AtomicU32::new(62)),
+            rec_tee: Arc::new(Mutex::new(None)),
             native_on: AtomicBool::new(false),
             native_failures: AtomicU32::new(0),
             audio_keep: AtomicU32::new(0),
@@ -621,7 +635,11 @@ impl Engine {
                     let r = run.take().unwrap();
                     let was_native = r.is_native();
                     drop(run);
-                    self.stop_recording();
+                    // A native recording carries on through an engine restart (same buffer, same file).
+                    let gives_up = self.s.native_failures.load(Ordering::SeqCst) + 1 >= NATIVE_MAX_FAILURES;
+                    if !was_native || game_gone || gives_up {
+                        self.stop_recording();
+                    }
                     stop_running(r);
                     self.s.native_on.store(false, Ordering::SeqCst);
                     if was_native && !game_gone {
@@ -889,14 +907,9 @@ impl Engine {
 
     // ---------- the native engine ----------
 
-    /// Whether to record with Clipit's own engine now. Long recordings and AV1
-    /// still use the classic recorder (for now).
+    /// Whether to record with Clipit's own engine now (AV1 still uses the classic recorder).
     fn use_native(&self, cfg: &Capture) -> bool {
-        cfg.engine == "native"
-            && cfg.codec != "av1"
-            && !self.is_recording()
-            && !self.s.want_record.load(Ordering::SeqCst)
-            && self.s.native_failures.load(Ordering::SeqCst) < NATIVE_MAX_FAILURES
+        cfg.engine == "native" && cfg.codec != "av1" && self.s.native_failures.load(Ordering::SeqCst) < NATIVE_MAX_FAILURES
     }
 
     fn native_failed(&self, why: &str) {
@@ -972,6 +985,7 @@ impl Engine {
             self.s.pring.clone(),
             self.s.pkeep.clone(),
             max_bytes,
+            self.s.rec_tee.clone(),
         )?;
         #[cfg(debug_assertions)]
         println!("[native] {} {}x{} @ {} fps, {} kbps", engine.stats().encoder, ow, oh, plan.fps, plan.kbps);
@@ -1389,7 +1403,11 @@ impl Engine {
         self.s.want_record.store(true, Ordering::SeqCst);
         let t0 = Instant::now();
         let ready = loop {
-            let ok = self.s.run.lock().unwrap().as_ref().is_some_and(|r| !r.is_native()) && self.s.ring.lock().unwrap().header().is_some();
+            let ok = match self.s.run.lock().unwrap().as_ref() {
+                Some(r) if r.is_native() => self.s.pring.lock().unwrap().newest_hns().is_some(),
+                Some(_) => self.s.ring.lock().unwrap().header().is_some(),
+                None => false,
+            };
             if ok {
                 break true;
             }
@@ -1407,6 +1425,9 @@ impl Engine {
         let opts = Self::audio_opts(&cfg);
         let shared = self.s.clone();
         let cam = if self.cam_live() { self.start_cam_recording() } else { None };
+        if self.s.native_on.load(Ordering::SeqCst) {
+            return self.start_native_recording(&cfg, out, cam);
+        }
         let mut live = mux::start_live(&ffmpeg, &opts, &out, &|c| shared.job.add(c))?;
         let header = self.s.ring.lock().unwrap().header().unwrap_or_default();
 
@@ -1484,12 +1505,140 @@ impl Engine {
             })
         });
 
-        *self.s.recording.lock().unwrap() = Some(Recording { path: out.clone(), start_hns, stop, video: Some(video), audio, pipe_name, mux: Some(live), failed, cam });
+        *self.s.recording.lock().unwrap() = Some(Recording { path: out.clone(), start_hns, stop, video: Some(video), audio, pipe_name, mux: Some(live), failed, cam, native: None });
         if cfg.sounds {
             sound::play(sound::Cue::RecordStart);
         }
         (self.s.events)(Event::RecordingStarted(out));
         Ok(())
+    }
+
+    /// A recording on the native engine: it continues the replay buffer from its
+    /// newest keyframe (so it starts at once) and goes straight into the MP4.
+    fn start_native_recording(&self, cfg: &Capture, out: PathBuf, cam: Option<(PathBuf, Arc<AtomicI64>)>) -> Result<(), String> {
+        let opts = Self::audio_opts(cfg);
+        let titles = native_track_titles(&opts);
+        let asc = native::AacStream::open(2, audio::RATE as u32, 192)?.asc;
+        let metas = titles.iter().map(|t| mp4::AudioTrack { title: t.to_string(), rate: audio::RATE as u32, channels: 2, asc, frames: Vec::new(), kbps: 192 }).collect();
+        let part = mux::part_path(&out);
+        let (tx, rx) = std::sync::mpsc::channel::<packets::RecMsg>();
+        let start_hns = Arc::new(AtomicI64::new(0));
+        let mut writer = {
+            let ring = self.s.pring.lock().unwrap();
+            let w = mp4::LiveWriter::create(&part, ring.format, metas)?;
+            let seed = ring.from_last_key();
+            start_hns.store(seed.first().map(|p| p.t).unwrap_or_else(now_hns), Ordering::SeqCst);
+            for p in seed {
+                let _ = tx.send(packets::RecMsg::Video(p));
+            }
+            // From here on every new packet also goes to the recording.
+            *self.s.rec_tee.lock().unwrap() = Some(tx.clone());
+            w
+        };
+        let writer_thread = std::thread::Builder::new()
+            .name("recording-writer".into())
+            .spawn(move || {
+                let mut err: Option<String> = None;
+                for msg in rx {
+                    let r = match msg {
+                        packets::RecMsg::Video(p) => writer.video(&p),
+                        packets::RecMsg::Audio(i, f) => writer.audio(i, &f),
+                        packets::RecMsg::Stop => break,
+                    };
+                    if let Err(e) = r {
+                        err.get_or_insert(e); // keep draining; the clip is reported as failed
+                    }
+                }
+                match err {
+                    Some(e) => Err(e),
+                    None => writer.finish(),
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        // Audio: mixed and encoded in pieces, about 300 ms behind real time.
+        let stop = Arc::new(AtomicBool::new(false));
+        let end_hns = Arc::new(AtomicI64::new(0));
+        let audio_thread = {
+            let (desktop, mic) = (self.s.desktop.clone(), self.s.mic.clone());
+            let (stop, end_hns, start_hns, tx) = (stop.clone(), end_hns.clone(), start_hns.clone(), tx.clone());
+            std::thread::Builder::new()
+                .name("recording-audio".into())
+                .spawn(move || {
+                    let mut enc: Vec<native::AacStream> = titles.iter().filter_map(|_| native::AacStream::open(2, audio::RATE as u32, 192).ok()).collect();
+                    let mut clean = opts.noise_suppression.then(denoise::Stream::new);
+                    let mut cursor = audio::frame_of(start_hns.load(Ordering::SeqCst) + AUDIO_SHIFT_HNS);
+                    loop {
+                        let stopping = stop.load(Ordering::SeqCst);
+                        let to = if stopping {
+                            audio::frame_of(end_hns.load(Ordering::SeqCst) + AUDIO_SHIFT_HNS)
+                        } else {
+                            // Whole 480-frame blocks (the noise filter's size).
+                            let t = audio::frame_of(now_hns() - 3_000_000);
+                            cursor + (t - cursor).max(0) / 480 * 480
+                        };
+                        if to > cursor {
+                            let d = opts.desktop.then(|| desktop.lock().unwrap().read_frames(cursor, to));
+                            let mut m = opts.mic.then(|| mic.lock().unwrap().read_frames(cursor, to));
+                            if let (Some(m), Some(c)) = (m.as_mut(), clean.as_mut()) {
+                                c.process(m);
+                            }
+                            let no_denoise = mux::AudioOpts { noise_suppression: false, ..opts.clone() };
+                            for (i, (_, pcm)) in native_tracks(d, m, &no_denoise).into_iter().enumerate() {
+                                if let Some(e) = enc.get_mut(i) {
+                                    for f in e.push(&pcm).unwrap_or_default() {
+                                        let _ = tx.send(packets::RecMsg::Audio(i, f));
+                                    }
+                                }
+                            }
+                            cursor = to;
+                        }
+                        if stopping {
+                            for (i, e) in enc.iter_mut().enumerate() {
+                                for f in e.finish().unwrap_or_default() {
+                                    let _ = tx.send(packets::RecMsg::Audio(i, f));
+                                }
+                            }
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                })
+                .map_err(|e| e.to_string())?
+        };
+        let native = NativeRec { part, tx, writer: writer_thread, audio: audio_thread, end_hns };
+        *self.s.recording.lock().unwrap() = Some(Recording {
+            path: out.clone(),
+            start_hns,
+            stop,
+            video: None,
+            audio: None,
+            pipe_name: None,
+            mux: None,
+            failed: Arc::new(AtomicBool::new(false)),
+            cam,
+            native: Some(native),
+        });
+        if cfg.sounds {
+            sound::play(sound::Cue::RecordStart);
+        }
+        (self.s.events)(Event::RecordingStarted(out));
+        Ok(())
+    }
+
+    fn finish_native_recording(&self, n: NativeRec, out: &Path, stop: &AtomicBool) -> Result<u64, String> {
+        // No more video; the audio ends where the video does.
+        let end = {
+            let ring = self.s.pring.lock().unwrap();
+            *self.s.rec_tee.lock().unwrap() = None;
+            ring.newest_hns().unwrap_or_else(now_hns)
+        };
+        n.end_hns.store(end, Ordering::SeqCst);
+        stop.store(true, Ordering::SeqCst);
+        let _ = n.audio.join();
+        let _ = n.tx.send(packets::RecMsg::Stop);
+        let size = n.writer.join().map_err(|_| "The recording writer crashed".to_string())??;
+        mux::rename_retry(&n.part, out, Duration::from_secs(15)).map_err(|e| format!("Couldn't finish the recording: {e}"))?;
+        Ok(size)
     }
 
     pub fn stop_recording(&self) {
@@ -1498,9 +1647,13 @@ impl Engine {
             return;
         };
         self.s.want_record.store(false, Ordering::SeqCst);
+        self.s.cam_ring.lock().unwrap().tee = None; // closes the hand cam file
+        if let Some(n) = rec.native.take() {
+            let result = self.finish_native_recording(n, &rec.path, &rec.stop);
+            return self.recording_done(rec, result, false);
+        }
         // Stop feeding video (dropping the tee closes the channel → writer exits).
         self.s.ring.lock().unwrap().tee = None;
-        self.s.cam_ring.lock().unwrap().tee = None; // closes the hand cam file
         if let Some(v) = rec.video.take() {
             let _ = v.join();
         }
@@ -1518,10 +1671,15 @@ impl Engine {
             }
             let _ = a.join();
         }
-        let sounds = self.s.cfg.lock().unwrap().sounds;
-        let path = rec.path.clone();
         let failed = rec.failed.load(Ordering::SeqCst);
         let result = rec.mux.take().map(|m| m.finish()).unwrap_or(Err("no muxer".into()));
+        self.recording_done(rec, result, failed)
+    }
+
+    /// Hand cam, sound and events once a recording's file is finished.
+    fn recording_done(&self, mut rec: Recording, result: Result<u64, String>, failed: bool) {
+        let sounds = self.s.cfg.lock().unwrap().sounds;
+        let path = rec.path.clone();
         // Hand cam: added in the background; the recording is usable right away.
         if let Some((file, cam_start)) = rec.cam.take() {
             let (cam_start, rec_start) = (cam_start.load(Ordering::SeqCst), rec.start_hns.load(Ordering::SeqCst));
@@ -1771,6 +1929,16 @@ fn save_native(snap: &packets::Snapshot, desktop: Option<Vec<i16>>, mic: Option<
     // Antivirus may hold a brand-new file for a moment.
     mux::rename_retry(&part, out, Duration::from_secs(15)).map_err(|e| format!("Couldn't finish the clip: {e}"))?;
     Ok(size)
+}
+
+fn native_track_titles(a: &mux::AudioOpts) -> Vec<&'static str> {
+    match (a.desktop, a.mic) {
+        (true, true) if a.separate_tracks => vec!["Game + mic", "Desktop", "Microphone"],
+        (true, true) => vec!["Game + mic"],
+        (true, false) => vec!["Desktop"],
+        (false, true) => vec!["Microphone"],
+        (false, false) => Vec::new(),
+    }
 }
 
 /// The same tracks the classic recorder makes: "Game + mic" (mixed, limited),
@@ -2097,6 +2265,56 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(d1 > 19.0, "{d1}");
         assert_eq!(errors, 0);
+    }
+
+    /// A 6 s recording on the native engine: starts at once, plays cleanly.
+    /// cargo test recording_real -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn recording_real() {
+        let dir = std::env::temp_dir().join(format!("clipit-rec-{}", std::process::id()));
+        let mut cfg = Capture::default();
+        cfg.target = "monitor".into();
+        cfg.sounds = false;
+        cfg.auto_clip_kills = false;
+        cfg.count_kills = false;
+        cfg.noise_suppression = true;
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let tx = Mutex::new(tx);
+        let ffmpeg = crate::media::find_ffmpeg().map(|f| f.path).unwrap();
+        let engine = Engine::start(Some(ffmpeg.clone()), String::new(), cfg, dir.join("clips").to_string_lossy().into_owned(), dir.join("data"), Box::new(move |ev| {
+            let msg = match ev {
+                Event::RecordingStopped { path, size } => format!("saved {}|{size}", path.display()),
+                Event::RecordingFailed(w) | Event::Warning(w) => format!("problem {w}"),
+                _ => return,
+            };
+            let _ = tx.lock().unwrap().send(msg);
+        }));
+        let t = Instant::now();
+        while engine.status().buffered_secs < 3.0 {
+            assert!(t.elapsed() < Duration::from_secs(40), "capture didn't start: {:?}", engine.status());
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let pressed = Instant::now();
+        engine.toggle_recording().unwrap();
+        println!("recording started in {:?} ({})", pressed.elapsed(), engine.status().encoder);
+        std::thread::sleep(Duration::from_secs(6));
+        let stopped = Instant::now();
+        engine.toggle_recording().unwrap();
+        let msg = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        println!("stopped in {:?}: {msg}", stopped.elapsed());
+        let path = msg.strip_prefix("saved ").expect("saved").split('|').next().unwrap().to_string();
+        let o = Command::new(&ffmpeg).args(["-hide_banner", "-v", "error", "-i", &path, "-f", "null", "-"]).output().unwrap();
+        let errors = String::from_utf8_lossy(&o.stderr).to_string();
+        let info = Command::new(&ffmpeg).args(["-hide_banner", "-i", &path]).output().unwrap();
+        let text = String::from_utf8_lossy(&info.stderr).to_string();
+        for l in text.lines().filter(|l| l.contains("Duration") || l.contains("Stream #")) {
+            println!("{l}");
+        }
+        engine.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(errors.trim().is_empty(), "{errors}");
+        assert!(text.contains("Duration: 00:00:0"), "{text}");
     }
 
     /// CLIPIT_CAMERA="Iriun Webcam" cargo test handcam_real -- --ignored --nocapture

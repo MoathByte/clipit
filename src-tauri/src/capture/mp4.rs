@@ -297,56 +297,91 @@ fn trak(t: &Track, id: u32, movie_dur_ms: u64, enabled: bool, alt_group: u16) ->
     bx(b"trak", &cat(&parts))
 }
 
-/// Writes the clip. Returns the file size.
-pub fn write(path: &Path, video: &Snapshot, audio: &[AudioTrack]) -> Result<u64, String> {
-    let hevc = video.format.codec == 1;
-    let first = video.packets.first().ok_or("No video to save")?;
-    let (vps, sps, pps) = params(&first.data, hevc).ok_or("The first frame has no stream header")?;
-    let samples: Vec<Vec<u8>> = video.packets.iter().map(|p| sample(&p.data, hevc)).collect();
-    let fd = super::packets::frame_hns(video.format.fps);
-    let to_v = |hns: i64| (hns.max(0) as u128 * VIDEO_SCALE as u128 / 10_000_000) as u32;
-    let durations: Vec<u32> = video
-        .packets
-        .windows(2)
-        .map(|w| to_v(w[1].t - w[0].t).max(1))
-        .chain(std::iter::once(to_v(fd).max(1)))
-        .collect();
-    let sync: Vec<u32> = video.packets.iter().enumerate().filter(|(_, p)| p.key).map(|(i, _)| i as u32 + 1).collect();
-    let (w, h) = (video.format.width, video.format.height);
+fn ftyp() -> Vec<u8> {
+    bx(b"ftyp", &cat(&[b"isom".to_vec(), 512u32.to_be_bytes().to_vec(), b"isomiso2avc1mp41".to_vec()]))
+}
 
+fn to_video_scale(hns: i64) -> u32 {
+    (hns.max(0) as u128 * VIDEO_SCALE as u128 / 10_000_000) as u32
+}
+
+fn video_track(format: super::packets::Format, ps: &(Vec<u8>, Vec<u8>, Vec<u8>), durations: Vec<u32>, sizes: Vec<u32>, sync: Vec<u32>) -> Track {
+    let hevc = format.codec == 1;
+    let (w, h) = (format.width, format.height);
     let mut entry = W::new();
     entry.zeros(6).u16(1).zeros(16).u16(w as u16).u16(h as u16).u32(0x0048_0000).u32(0x0048_0000).u32(0).u16(1).zeros(32).u16(0x18).u16(0xffff);
-    entry.bytes(&if hevc { hvcc(&vps, &sps, &pps) } else { avcc(&sps, &pps) });
-    let mut tracks = vec![Track {
+    entry.bytes(&if hevc { hvcc(&ps.0, &ps.1, &ps.2) } else { avcc(&ps.1, &ps.2) });
+    Track {
         handler: *b"vide",
         title: "Video".into(),
         scale: VIDEO_SCALE,
         durations,
-        sizes: samples.iter().map(|s| s.len() as u32).collect(),
+        sizes,
         sync: Some(sync),
         stsd_entry: bx(if hevc { b"hvc1" } else { b"avc1" }, &entry.0),
         width: w,
         height: h,
         chunks: Vec::new(),
         offsets: Vec::new(),
-    }];
+    }
+}
+
+fn audio_track(a: &AudioTrack, sizes: Vec<u32>) -> Track {
+    let mut e = W::new();
+    e.zeros(6).u16(1).zeros(8).u16(a.channels).u16(16).u16(0).u16(0).u32(a.rate << 16);
+    e.bytes(&esds(a));
+    Track {
+        handler: *b"soun",
+        title: a.title.clone(),
+        scale: a.rate,
+        durations: vec![1024; sizes.len()],
+        sizes,
+        sync: None,
+        stsd_entry: bx(b"mp4a", &e.0),
+        width: 0,
+        height: 0,
+        chunks: Vec::new(),
+        offsets: Vec::new(),
+    }
+}
+
+fn moov(tracks: &[Track]) -> Vec<u8> {
+    let movie_ms = tracks.iter().map(|t| t.duration() * 1000 / t.scale as u64).max().unwrap_or(0);
+    let mut mvhd = W::new();
+    mvhd.u32(0).u32(0).u32(1000).u32(movie_ms as u32).u32(0x0001_0000).u16(0x0100).zeros(10);
+    for m in MATRIX {
+        mvhd.u32(m);
+    }
+    mvhd.zeros(24).u32(tracks.len() as u32 + 1);
+    let mut parts = vec![full(b"mvhd", 0, 0, &mvhd.0)];
+    let mut first_audio = true;
+    for (i, t) in tracks.iter().enumerate() {
+        let audio = &t.handler == b"soun";
+        parts.push(trak(t, i as u32 + 1, movie_ms, !audio || first_audio, if audio { 1 } else { 0 }));
+        if audio {
+            first_audio = false;
+        }
+    }
+    bx(b"moov", &cat(&parts))
+}
+
+/// Writes the clip. Returns the file size.
+pub fn write(path: &Path, video: &Snapshot, audio: &[AudioTrack]) -> Result<u64, String> {
+    let hevc = video.format.codec == 1;
+    let first = video.packets.first().ok_or("No video to save")?;
+    let ps = params(&first.data, hevc).ok_or("The first frame has no stream header")?;
+    let samples: Vec<Vec<u8>> = video.packets.iter().map(|p| sample(&p.data, hevc)).collect();
+    let fd = super::packets::frame_hns(video.format.fps);
+    let durations: Vec<u32> = video
+        .packets
+        .windows(2)
+        .map(|w| to_video_scale(w[1].t - w[0].t).max(1))
+        .chain(std::iter::once(to_video_scale(fd).max(1)))
+        .collect();
+    let sync: Vec<u32> = video.packets.iter().enumerate().filter(|(_, p)| p.key).map(|(i, _)| i as u32 + 1).collect();
+    let mut tracks = vec![video_track(video.format, &ps, durations, samples.iter().map(|s| s.len() as u32).collect(), sync)];
     for a in audio {
-        let mut e = W::new();
-        e.zeros(6).u16(1).zeros(8).u16(a.channels).u16(16).u16(0).u16(0).u32(a.rate << 16);
-        e.bytes(&esds(a));
-        tracks.push(Track {
-            handler: *b"soun",
-            title: a.title.clone(),
-            scale: a.rate,
-            durations: vec![1024; a.frames.len()],
-            sizes: a.frames.iter().map(|f| f.len() as u32).collect(),
-            sync: None,
-            stsd_entry: bx(b"mp4a", &e.0),
-            width: 0,
-            height: 0,
-            chunks: Vec::new(),
-            offsets: Vec::new(),
-        });
+        tracks.push(audio_track(a, a.frames.iter().map(|f| f.len() as u32).collect()));
     }
 
     // Interleave: half a second of each track at a time.
@@ -379,28 +414,9 @@ pub fn write(path: &Path, video: &Snapshot, audio: &[AudioTrack]) -> Result<u64,
         tracks[ti].offsets.push(0);
     }
 
-    let movie_ms = tracks.iter().map(|t| t.duration() * 1000 / t.scale as u64).max().unwrap_or(0);
-    let ftyp = bx(b"ftyp", &cat(&[b"isom".to_vec(), 512u32.to_be_bytes().to_vec(), b"isomiso2avc1mp41".to_vec()]));
-    let build_moov = |tracks: &[Track]| {
-        let mut mvhd = W::new();
-        mvhd.u32(0).u32(0).u32(1000).u32(movie_ms as u32).u32(0x0001_0000).u16(0x0100).zeros(10);
-        for m in MATRIX {
-            mvhd.u32(m);
-        }
-        mvhd.zeros(24).u32(tracks.len() as u32 + 1);
-        let mut parts = vec![full(b"mvhd", 0, 0, &mvhd.0)];
-        let mut first_audio = true;
-        for (i, t) in tracks.iter().enumerate() {
-            let audio = &t.handler == b"soun";
-            parts.push(trak(t, i as u32 + 1, movie_ms, !audio || first_audio, if audio { 1 } else { 0 }));
-            if audio {
-                first_audio = false;
-            }
-        }
-        bx(b"moov", &cat(&parts))
-    };
-    // Offsets depend on the moov's size, which doesn't depend on the offsets' values.
-    let moov_len = build_moov(&tracks).len() as u64;
+    let ftyp = ftyp();
+    // Offsets depend on the moov size, which does not depend on the offset values.
+    let moov_len = moov(&tracks).len() as u64;
     let mut pos = ftyp.len() as u64 + moov_len + 16;
     let mut chunk_no = vec![0usize; tracks.len()];
     for &(ti, start, n) in &order {
@@ -408,7 +424,7 @@ pub fn write(path: &Path, video: &Snapshot, audio: &[AudioTrack]) -> Result<u64,
         chunk_no[ti] += 1;
         pos += tracks[ti].sizes[start..start + n].iter().map(|&s| s as u64).sum::<u64>();
     }
-    let moov = build_moov(&tracks);
+    let moov = moov(&tracks);
     let mdat_len = pos - ftyp.len() as u64 - moov.len() as u64;
 
     let file = std::fs::File::create(path).map_err(|e| format!("Couldn't create the clip: {e}"))?;
@@ -431,6 +447,119 @@ pub fn write(path: &Path, video: &Snapshot, audio: &[AudioTrack]) -> Result<u64,
     let file = f.into_inner().map_err(|e| format!("Couldn't write the clip: {e}"))?;
     file.sync_data().map_err(io)?;
     Ok(pos)
+}
+
+/// A long recording written as it happens: samples go straight to the file and
+/// the index (moov) is added at the end. Nothing big is kept in memory.
+pub struct LiveWriter {
+    file: BufWriter<std::fs::File>,
+    pos: u64,
+    format: super::packets::Format,
+    ps: Option<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+    v_times: Vec<i64>,
+    v_sizes: Vec<u32>,
+    v_offsets: Vec<u64>,
+    v_sync: Vec<u32>,
+    audio: Vec<(AudioTrack, Vec<u32>, Vec<u64>)>,
+}
+
+impl LiveWriter {
+    /// `audio`: the tracks (their `frames` stay empty; frames come through `audio()`).
+    pub fn create(path: &Path, format: super::packets::Format, audio: Vec<AudioTrack>) -> Result<Self, String> {
+        let file = std::fs::File::create(path).map_err(|e| format!("Couldn't create the recording: {e}"))?;
+        let mut file = BufWriter::with_capacity(4 << 20, file);
+        let ftyp = ftyp();
+        let io = |e: std::io::Error| format!("Couldn't write the recording: {e}");
+        file.write_all(&ftyp).map_err(io)?;
+        // 64-bit mdat header; its size is filled in at the end.
+        file.write_all(&1u32.to_be_bytes()).map_err(io)?;
+        file.write_all(b"mdat").map_err(io)?;
+        file.write_all(&0u64.to_be_bytes()).map_err(io)?;
+        let pos = ftyp.len() as u64 + 16;
+        Ok(Self {
+            file,
+            pos,
+            format,
+            ps: None,
+            v_times: Vec::new(),
+            v_sizes: Vec::new(),
+            v_offsets: Vec::new(),
+            v_sync: Vec::new(),
+            audio: audio.into_iter().map(|a| (a, Vec::new(), Vec::new())).collect(),
+        })
+    }
+
+    /// Time (QPC) of the first video frame, once there is one.
+    pub fn start_hns(&self) -> Option<i64> {
+        self.v_times.first().copied()
+    }
+
+    pub fn video(&mut self, p: &super::packets::Packet) -> Result<(), String> {
+        let hevc = self.format.codec == 1;
+        if self.ps.is_none() {
+            if !p.key {
+                return Ok(()); // wait for a keyframe
+            }
+            match params(&p.data, hevc) {
+                Some(ps) => self.ps = Some(ps),
+                None => return Ok(()),
+            }
+        }
+        if self.v_times.last().is_some_and(|&t| p.t <= t) {
+            return Ok(());
+        }
+        let s = sample(&p.data, hevc);
+        self.file.write_all(&s).map_err(|e| format!("Couldn't write the recording: {e}"))?;
+        self.v_offsets.push(self.pos);
+        self.v_sizes.push(s.len() as u32);
+        self.v_times.push(p.t);
+        if p.key {
+            self.v_sync.push(self.v_sizes.len() as u32);
+        }
+        self.pos += s.len() as u64;
+        Ok(())
+    }
+
+    pub fn audio(&mut self, track: usize, frame: &[u8]) -> Result<(), String> {
+        if self.ps.is_none() {
+            return Ok(()); // audio starts with the video
+        }
+        self.file.write_all(frame).map_err(|e| format!("Couldn't write the recording: {e}"))?;
+        let (_, sizes, offsets) = &mut self.audio[track];
+        offsets.push(self.pos);
+        sizes.push(frame.len() as u32);
+        self.pos += frame.len() as u64;
+        Ok(())
+    }
+
+    /// Adds the index and closes the file. Returns its size.
+    pub fn finish(self) -> Result<u64, String> {
+        use std::io::{Seek, SeekFrom};
+        let io = |e: std::io::Error| format!("Couldn't finish the recording: {e}");
+        let Self { file, pos, format, ps, v_times, v_sizes, v_offsets, v_sync, audio } = self;
+        let ps = ps.ok_or("Nothing was recorded")?;
+        let fd = super::packets::frame_hns(format.fps);
+        let durations: Vec<u32> = v_times.windows(2).map(|w| to_video_scale(w[1] - w[0]).max(1)).chain(std::iter::once(to_video_scale(fd).max(1))).collect();
+        let mut v = video_track(format, &ps, durations, v_sizes, v_sync);
+        // One sample per chunk: the offsets are where each one landed.
+        v.chunks = (0..v_offsets.len()).map(|i| (i, 1)).collect();
+        v.offsets = v_offsets;
+        let mut tracks = vec![v];
+        for (a, sizes, offsets) in &audio {
+            let mut t = audio_track(a, sizes.clone());
+            t.chunks = (0..offsets.len()).map(|i| (i, 1)).collect();
+            t.offsets = offsets.clone();
+            tracks.push(t);
+        }
+        let moov = moov(&tracks);
+        let mut file = file.into_inner().map_err(|e| format!("Couldn't finish the recording: {e}"))?;
+        file.write_all(&moov).map_err(io)?;
+        let head = ftyp().len() as u64;
+        file.seek(SeekFrom::Start(head + 8)).map_err(io)?;
+        file.write_all(&(pos - head).to_be_bytes()).map_err(io)?;
+        file.sync_data().map_err(io)?;
+        Ok(pos + moov.len() as u64)
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +601,7 @@ mod real {
                 ring.clone(),
                 Arc::new(AtomicU32::new(30)),
                 usize::MAX,
+                Arc::new(Mutex::new(None)),
             )
             .unwrap();
             std::thread::sleep(std::time::Duration::from_secs(4));
@@ -523,7 +653,7 @@ mod sync {
         ring.lock().unwrap().set_format(Format { codec: 0, width: 1280, height: 720, fps: 60 });
         let e = native::Engine::start(
             native::Options { hwnd: 0, hmonitor: mon, width: 1280, height: 720, fps: 60, kbps: 8000, max_kbps: 12000, hevc: false, cursor: false, tap: None },
-            ring.clone(), Arc::new(AtomicU32::new(30)), usize::MAX).unwrap();
+            ring.clone(), Arc::new(AtomicU32::new(30)), usize::MAX, Arc::new(Mutex::new(None))).unwrap();
         std::thread::sleep(std::time::Duration::from_secs(2));
         drop(e);
         let snap = ring.lock().unwrap().snapshot_since(60.0, None).unwrap();

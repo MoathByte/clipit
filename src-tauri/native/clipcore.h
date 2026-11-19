@@ -67,6 +67,14 @@ void cc_stop(cc_engine* e);
 int32_t cc_aac_encode(const int16_t* pcm, size_t frames, uint32_t channels, uint32_t rate, uint32_t kbps,
                       cc_packet_fn on_frame, void* user, uint8_t asc[2], char* err, size_t errlen);
 
+// The same, streaming (long recordings): open, push PCM as it comes, finish.
+// Use one encoder from one thread.
+typedef struct cc_aac cc_aac;
+cc_aac* cc_aac_open(uint32_t channels, uint32_t rate, uint32_t kbps, uint8_t asc[2], char* err, size_t errlen);
+int32_t cc_aac_push(cc_aac* a, const int16_t* pcm, size_t frames, cc_packet_fn on_frame, void* user);
+int32_t cc_aac_finish(cc_aac* a, cc_packet_fn on_frame, void* user);
+void cc_aac_close(cc_aac* a);
+
 #ifdef __cplusplus
 }
 #endif
