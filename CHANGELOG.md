@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.17.0
+
+### New
+- **Game art for everyone, no key needed.** Covers, banners, logos and icons for 44 popular games now come with
+  Clipit: Counter-Strike 2, Minecraft, VALORANT, GTA V and VI, Growtopia, Fortnite, Apex Legends, League of Legends,
+  Rocket League, Overwatch 2, Warzone, Black Ops 6, Rainbow Six Siege, Roblox, Dota 2, PUBG, Rust, Destiny 2, Marvel
+  Rivals, THE FINALS, Tarkov, Battlefield 6, ARC Raiders, Genshin Impact, Dead by Daylight, Lethal Company, Among Us,
+  Fall Guys, TF2, Halo Infinite, Forza Horizon 5, EA FC, Elden Ring, Deadlock, RDR2, Cyberpunk 2077, Brawlhalla,
+  Splitgate, Hunt: Showdown, REMATCH, Delta Force, PEAK and R.E.P.O. A SteamGridDB key (Settings > Storage) is now only
+  needed for other games.
+- **Folders get a proper icon** instead of their first letter (the Desktop folder gets a screen).
+- **Filter menu for every game.** The new Filter button sorts clips by length (under 30 s, 30 s to 2 min, over
+  2 min), size and date. The VALORANT filters (map, agent, kills) now show in the VALORANT folder; to have them on
+  every page, tick "VALORANT filters" in the menu or turn on Settings > General > VALORANT filters everywhere. It's
+  remembered.
+- **A new first-time setup.** A welcome over drifting game covers and slow moving light, then a few short questions:
+  what you'll use Clipit for (VALORANT, other games, recording sessions, or just your clip library), the look, how
+  Clipit pops up (with live previews of each), hotkeys, sound, recording and whether it starts with Windows. Clipit
+  sets itself up around the answers. Every step has "Skip, use default", and the welcome can skip everything.
+
+### Feels better
+- **Smooth scrolling**: a mouse wheel's notch glides instead of jumping.
+- **Clip cards arrive one after another** when you open a page, lift on a soft spring when you hover, and their
+  picture eases in a little closer. Buttons sink slightly when pressed. As before, nothing replays when you only
+  change a setting or a filter.
+- **New headings** in Bricolage Grotesque, rounder cards and dialogs, and a sidebar that floats in the window.
+- Reduce motion turns all of it off.
+
 ## 0.16.1
 
 ### New

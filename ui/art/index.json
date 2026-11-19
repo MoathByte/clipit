@@ -1,0 +1,636 @@
+{
+ "games": [
+  {
+   "slug": "cs2",
+   "name": "Counter-Strike 2",
+   "aliases": [
+    "counterstrike2",
+    "cs2",
+    "csgo",
+    "counterstrikeglobaloffensive",
+    "counterstrike"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "minecraft",
+   "name": "Minecraft",
+   "aliases": [
+    "minecraft",
+    "minecraftlauncher",
+    "minecraftjavaedition",
+    "minecraftbedrock"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "valorant",
+   "name": "VALORANT",
+   "aliases": [
+    "valorant"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "gta6",
+   "name": "Grand Theft Auto VI",
+   "aliases": [
+    "grandtheftautovi",
+    "gta6",
+    "gtavi",
+    "grandtheftauto6"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "gta5",
+   "name": "Grand Theft Auto V",
+   "aliases": [
+    "grandtheftautov",
+    "gta5",
+    "gtav",
+    "grandtheftauto5",
+    "grandtheftautovenhanced",
+    "gta5enhanced"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "growtopia",
+   "name": "Growtopia",
+   "aliases": [
+    "growtopia"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "fortnite",
+   "name": "Fortnite",
+   "aliases": [
+    "fortnite",
+    "fortniteclient"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "apex",
+   "name": "Apex Legends",
+   "aliases": [
+    "apexlegends",
+    "apex",
+    "r5apex"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "lol",
+   "name": "League of Legends",
+   "aliases": [
+    "leagueoflegends",
+    "lol",
+    "league"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "rocketleague",
+   "name": "Rocket League",
+   "aliases": [
+    "rocketleague"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "overwatch",
+   "name": "Overwatch 2",
+   "aliases": [
+    "overwatch2",
+    "overwatch"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "warzone",
+   "name": "Call of Duty: Warzone",
+   "aliases": [
+    "callofdutywarzone",
+    "warzone",
+    "codwarzone"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "bo6",
+   "name": "Call of Duty: Black Ops 6",
+   "aliases": [
+    "callofdutyblackops6",
+    "blackops6",
+    "bo6"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "r6",
+   "name": "Rainbow Six Siege",
+   "aliases": [
+    "tomclancysrainbowsixsiege",
+    "rainbowsixsiege",
+    "r6",
+    "r6s",
+    "rainbowsix",
+    "siege",
+    "rainbowsixsiegex"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "roblox",
+   "name": "Roblox",
+   "aliases": [
+    "roblox",
+    "robloxplayer",
+    "robloxplayerbeta"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "dota2",
+   "name": "Dota 2",
+   "aliases": [
+    "dota2",
+    "dota"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "pubg",
+   "name": "PUBG: Battlegrounds",
+   "aliases": [
+    "pubgbattlegrounds",
+    "pubg",
+    "playerunknownsbattlegrounds",
+    "tslgame"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "rust",
+   "name": "Rust",
+   "aliases": [
+    "rust",
+    "rustclient"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "destiny2",
+   "name": "Destiny 2",
+   "aliases": [
+    "destiny2"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "marvelrivals",
+   "name": "Marvel Rivals",
+   "aliases": [
+    "marvelrivals"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "thefinals",
+   "name": "THE FINALS",
+   "aliases": [
+    "thefinals",
+    "discovery"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "tarkov",
+   "name": "Escape from Tarkov",
+   "aliases": [
+    "escapefromtarkov",
+    "tarkov",
+    "eft"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "bf6",
+   "name": "Battlefield 6",
+   "aliases": [
+    "battlefield6",
+    "bf6"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "arcraiders",
+   "name": "ARC Raiders",
+   "aliases": [
+    "arcraiders"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "genshin",
+   "name": "Genshin Impact",
+   "aliases": [
+    "genshinimpact",
+    "genshin"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "dbd",
+   "name": "Dead by Daylight",
+   "aliases": [
+    "deadbydaylight",
+    "dbd"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "lethalcompany",
+   "name": "Lethal Company",
+   "aliases": [
+    "lethalcompany"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "amongus",
+   "name": "Among Us",
+   "aliases": [
+    "amongus"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "fallguys",
+   "name": "Fall Guys",
+   "aliases": [
+    "fallguys",
+    "fallguysclient"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "tf2",
+   "name": "Team Fortress 2",
+   "aliases": [
+    "teamfortress2",
+    "tf2",
+    "tf"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "haloinfinite",
+   "name": "Halo Infinite",
+   "aliases": [
+    "haloinfinite"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "fh5",
+   "name": "Forza Horizon 5",
+   "aliases": [
+    "forzahorizon5",
+    "fh5"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "eafc",
+   "name": "EA SPORTS FC 26",
+   "aliases": [
+    "easportsfc26",
+    "eafc26",
+    "fc26",
+    "easportsfc25",
+    "eafc25",
+    "fc25",
+    "easportsfc"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "eldenring",
+   "name": "Elden Ring",
+   "aliases": [
+    "eldenring"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "deadlock",
+   "name": "Deadlock",
+   "aliases": [
+    "deadlock"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "rdr2",
+   "name": "Red Dead Redemption 2",
+   "aliases": [
+    "reddeadredemption2",
+    "rdr2",
+    "reddeadredemptionii"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "cyberpunk",
+   "name": "Cyberpunk 2077",
+   "aliases": [
+    "cyberpunk2077",
+    "cyberpunk"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "brawlhalla",
+   "name": "Brawlhalla",
+   "aliases": [
+    "brawlhalla"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "splitgate",
+   "name": "Splitgate",
+   "aliases": [
+    "splitgate",
+    "splitgate2"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "hunt",
+   "name": "Hunt: Showdown 1896",
+   "aliases": [
+    "huntshowdown1896",
+    "huntshowdown",
+    "hunt"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "rematch",
+   "name": "REMATCH",
+   "aliases": [
+    "rematch"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "deltaforce",
+   "name": "Delta Force",
+   "aliases": [
+    "deltaforce"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "peak",
+   "name": "PEAK",
+   "aliases": [
+    "peak"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  },
+  {
+   "slug": "repo",
+   "name": "R.E.P.O.",
+   "aliases": [
+    "repo"
+   ],
+   "art": [
+    "grid",
+    "hero",
+    "logo",
+    "icon"
+   ]
+  }
+ ]
+}

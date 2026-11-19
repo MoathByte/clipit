@@ -259,3 +259,97 @@ mod tests {
         assert_eq!(peaks_from_pcm(&pcm(&[0, 0, 0]), 3), vec![0, 0, 0]); // silence
     }
 }
+
+
+// ---------- clip length from the file header (no ffmpeg) ----------
+
+/// Lengths already read, by (path, size, modified): a library scan reads each file once.
+static DURATIONS: std::sync::Mutex<Option<std::collections::HashMap<(String, u64, u64), Option<f64>>>> = std::sync::Mutex::new(None);
+
+pub fn duration_cached(path: &Path, size: u64, modified_ms: u64) -> Option<f64> {
+    let key = (path.to_string_lossy().into_owned(), size, modified_ms);
+    if let Some(d) = DURATIONS.lock().unwrap().as_ref().and_then(|m| m.get(&key)) {
+        return *d;
+    }
+    let d = mp4_duration(path);
+    DURATIONS.lock().unwrap().get_or_insert_with(Default::default).insert(key, d);
+    d
+}
+
+/// An MP4/MOV's length from its movie header (mvhd), wherever the index sits in the
+/// file: only box headers are read, so it's a few small reads per file.
+pub fn mp4_duration(path: &Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let mut head = [0u8; 16];
+    // Top-level boxes until moov.
+    let mut pos = 0u64;
+    let moov = loop {
+        if pos + 8 > len {
+            return None;
+        }
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        f.read_exact(&mut head[..8]).ok()?;
+        let mut size = u32::from_be_bytes(head[0..4].try_into().ok()?) as u64;
+        let mut header = 8;
+        if size == 1 {
+            f.read_exact(&mut head[8..16]).ok()?;
+            size = u64::from_be_bytes(head[8..16].try_into().ok()?);
+            header = 16;
+        } else if size == 0 {
+            size = len - pos;
+        }
+        if size < header {
+            return None;
+        }
+        if &head[4..8] == b"moov" {
+            break (pos + header, pos + size);
+        }
+        pos += size;
+    };
+    // mvhd inside moov (normally the first child).
+    let mut pos = moov.0;
+    while pos + 8 <= moov.1 {
+        f.seek(SeekFrom::Start(pos)).ok()?;
+        f.read_exact(&mut head[..8]).ok()?;
+        let size = u32::from_be_bytes(head[0..4].try_into().ok()?) as u64;
+        if &head[4..8] == b"mvhd" {
+            let mut body = [0u8; 32];
+            f.read_exact(&mut body).ok()?;
+            let (scale, dur) = if body[0] == 1 {
+                (u32::from_be_bytes(body[20..24].try_into().ok()?) as f64, u64::from_be_bytes(body[24..32].try_into().ok()?) as f64)
+            } else {
+                (u32::from_be_bytes(body[12..16].try_into().ok()?) as f64, u32::from_be_bytes(body[16..20].try_into().ok()?) as f64)
+            };
+            return (scale > 0.0).then(|| dur / scale);
+        }
+        if size < 8 {
+            return None;
+        }
+        pos += size;
+    }
+    None
+}
+
+#[cfg(test)]
+mod duration_tests {
+    #[test]
+    fn reads_an_mp4_header() {
+        let dir = std::env::temp_dir().join(format!("clipit-dur-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("a.mp4");
+        // ftyp + mdat + moov(mvhd v0: timescale 1000, duration 12500)
+        let mut f = Vec::new();
+        f.extend_from_slice(&[0, 0, 0, 16]); f.extend_from_slice(b"ftypisom"); f.extend_from_slice(&[0, 0, 2, 0]);
+        f.extend_from_slice(&[0, 0, 0, 12]); f.extend_from_slice(b"mdat"); f.extend_from_slice(&[1, 2, 3, 4]);
+        let mut mvhd = vec![0u8; 100];
+        mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+        mvhd[16..20].copy_from_slice(&12500u32.to_be_bytes());
+        f.extend_from_slice(&(8 + 8 + mvhd.len() as u32).to_be_bytes()); f.extend_from_slice(b"moov");
+        f.extend_from_slice(&(8 + mvhd.len() as u32).to_be_bytes()); f.extend_from_slice(b"mvhd"); f.extend_from_slice(&mvhd);
+        std::fs::write(&p, f).unwrap();
+        assert_eq!(super::mp4_duration(&p), Some(12.5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

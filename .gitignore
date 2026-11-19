@@ -6,3 +6,6 @@ release-notes.tmp.md
 latest.json
 *.key
 *.log
+
+.impeccable/hook.cache.json
+.impeccable/config.local.json

@@ -326,15 +326,23 @@
 
   <!-- First-run setup -->
   <div class="wizard hidden" id="wizard" role="dialog" aria-modal="true" aria-labelledby="wiz-title">
+    <div class="wiz-scene" aria-hidden="true">
+      <div class="wiz-wall" id="wiz-wall"></div>
+      <div class="wiz-lights"><i></i><i></i><i></i><i></i></div>
+      <div class="wiz-shade"></div>
+    </div>
     <div class="wiz-card">
-      <div class="wiz-dots" id="wiz-dots"></div>
+      <div class="wiz-top"><div class="wiz-dots" id="wiz-dots"></div><span class="wiz-count" id="wiz-count"></span></div>
       <div class="wiz-body" id="wiz-body"></div>
       <div class="wiz-nav">
         <button class="btn ghost" id="wiz-back">Back</button>
-        <button class="btn primary" id="wiz-next">Next</button>
+        <button class="link wiz-skip" id="wiz-skip">Skip, use default</button>
+        <button class="btn primary" id="wiz-next">Continue</button>
       </div>
     </div>
   </div>
+
+  <div class="menu filter-menu hidden" id="filter-menu" role="dialog" aria-label="Filter clips"></div>
 
   <div class="toasts" id="toasts"></div>
 

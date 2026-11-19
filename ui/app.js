@@ -96,9 +96,48 @@ async function loadLibrary() {
 }
 
 let artErrorShown = false;
+// ---------- built-in artwork ----------
+// Covers, banners, logos and icons for popular games ship with Clipit (ui/art), so
+// they show up for everyone with no key. SteamGridDB (Settings > Storage) fills in the rest.
+const artKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const builtin = { map: new Map(), loaded: false };
+builtin.ready = fetch("art/index.json")
+  .then((r) => r.json())
+  .then((d) => {
+    for (const g of d.games || []) {
+      const art = { builtin: true, matched_name: g.name };
+      for (const k of g.art || []) art[k] = `art/${g.slug}/${k}.webp`;
+      builtin.map.set(g.slug, art);
+      for (const a of [artKey(g.name), ...(g.aliases || [])]) builtin.map.set(a, art);
+    }
+  })
+  .catch(() => {})
+  .finally(() => { builtin.loaded = true; });
+
+function builtinArt(name) {
+  const k = artKey(name);
+  return builtin.map.get(k) || null;
+}
+// Built-in art is part of the app; downloaded art is served by the clip server.
+const artSrc = (p) => (p && p.startsWith("art/") ? p : assetUrl(p));
+
+const FOLDER_SVG = `<svg viewBox="0 0 24 24" class="glyph-svg"><path d="M3.5 8A2.5 2.5 0 0 1 6 5.5h3.4a2 2 0 0 1 1.4.6l1.2 1.2a2 2 0 0 0 1.4.6H18A2.5 2.5 0 0 1 20.5 10.4V16A2.5 2.5 0 0 1 18 18.5H6A2.5 2.5 0 0 1 3.5 16z"/><path d="M3.5 10.5h17"/></svg>`;
+const DESKTOP_SVG = `<svg viewBox="0 0 24 24" class="glyph-svg"><rect x="3" y="4.5" width="18" height="12" rx="2.5"/><path d="M9 20h6M12 16.5V20"/></svg>`;
+const folderGlyph = (name) => (/^desktop$/i.test(String(name).trim()) ? DESKTOP_SVG : FOLDER_SVG);
+
 function loadArt() {
+  if (!builtin.loaded) {
+    builtin.ready.then(() => {
+      loadArt();
+      renderSidebar();
+      if (state.view.name !== "settings") rerenderKeepScroll();
+    });
+    return;
+  }
   for (const g of state.lib.games) {
     if (state.art[g.name]) continue;
+    const b = builtinArt(g.name);
+    if (b) { state.art[g.name] = b; continue; }
     state.art[g.name] = {}; // placeholder so we only request once
     invoke("get_game_art", { name: g.name })
       .then((art) => {
@@ -131,9 +170,9 @@ async function loadStatus() {
 
 function gameIcon(name) {
   const art = state.art[name] || {};
-  const src = assetUrl(art.icon) || assetUrl(art.grid);
+  const src = artSrc(art.icon) || artSrc(art.grid);
   if (src) return `<img class="game-icon" src="${src}" alt="">`;
-  return `<span class="game-icon">${esc(name.slice(0, 1).toUpperCase())}</span>`;
+  return `<span class="game-icon glyph" title="${esc(name)}">${folderGlyph(name)}</span>`;
 }
 
 function renderSidebar() {
@@ -205,6 +244,7 @@ function go(view, opts = {}) {
   state.search = "";
   state.filterMap = state.filterAgent = "";
   state.filterKills = 0;
+  state.fLen = state.fSize = state.fDate = "";
   main.scrollTop = 0;
   render();
   syncSelection();
@@ -257,9 +297,9 @@ function renderEmpty() {
 
 function posterArt(name) {
   const art = state.art[name] || {};
-  const src = assetUrl(art.grid);
+  const src = artSrc(art.grid);
   if (src) return `<img src="${src}" alt="">`;
-  return `<span class="poster-fallback">${esc(name.slice(0, 1).toUpperCase())}</span>`;
+  return `<span class="poster-fallback glyph">${folderGlyph(name)}</span>`;
 }
 
 // "Just now", "12 min ago", "Today at 2:14 AM", "Yesterday at …"
@@ -396,6 +436,7 @@ function renderClipsPage(game) {
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
         <input id="search" type="text" placeholder="Search" value="${esc(state.search)}" spellcheck="false">
       </label>
+      <button type="button" class="btn ghost filter-btn" id="filter-btn" aria-haspopup="dialog"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>Filter<span class="filter-count" id="filter-count"></span></button>
       <span id="tag-filters"></span>
       <select class="select" id="sort">
         <option value="new">Newest first</option>
@@ -415,9 +456,78 @@ function renderClipsPage(game) {
 }
 
 // Map / agent / kills filters, only when the clips on this page have tags.
+// The VALORANT filters (map, agent, kills) show in the VALORANT folder, and on other
+// pages when they're switched on (Filter menu, or Settings > General).
+const valorantFiltersOn = () => (state.view.name === "game" && isValorant(state.view.game)) || !!(state.config && state.config.valorant_filters);
+
+// Length, size and date: for every game.
+const LEN_FILTERS = [["", "Any length"], ["short", "Under 30 s"], ["mid", "30 s – 2 min"], ["long", "Over 2 min"]];
+const SIZE_FILTERS = [["", "Any size"], ["s", "Under 50 MB"], ["m", "50 – 200 MB"], ["l", "Over 200 MB"]];
+const DATE_FILTERS = [["", "Any time"], ["today", "Today"], ["week", "This week"], ["month", "This month"]];
+
+function filterCount() {
+  return [state.fLen, state.fSize, state.fDate].filter(Boolean).length;
+}
+
+function syncFilterButton() {
+  const n = filterCount();
+  const el = $("#filter-count");
+  if (el) el.textContent = n ? String(n) : "";
+  const b = $("#filter-btn");
+  if (b) b.classList.toggle("on", n > 0);
+}
+
+function openFilterMenu(btn) {
+  const menu = $("#filter-menu");
+  const chips = (key, items) => `<div class="fchips">${items.map(([v, l]) => `<button type="button" class="fchip${(state[key] || "") === v ? " on" : ""}" data-f="${key}" data-v="${v}">${esc(l)}</button>`).join("")}</div>`;
+  const inValorant = state.view.name === "game" && isValorant(state.view.game);
+  menu.innerHTML = `
+    <div class="fsec"><div class="fsec-title">Length</div>${chips("fLen", LEN_FILTERS)}</div>
+    <div class="fsec"><div class="fsec-title">Size</div>${chips("fSize", SIZE_FILTERS)}</div>
+    <div class="fsec"><div class="fsec-title">Date</div>${chips("fDate", DATE_FILTERS)}</div>
+    <label class="frow${inValorant ? " disabled" : ""}">
+      <span><b>VALORANT filters</b><small>${inValorant ? "Always on in the VALORANT folder." : "Map, agent and kills on every page. Remembered."}</small></span>
+      <span class="switch"><input type="checkbox" id="f-valorant" ${valorantFiltersOn() ? "checked" : ""} ${inValorant ? "disabled" : ""}></span>
+    </label>
+    <div class="ffoot"><button type="button" class="link" id="f-reset"${filterCount() ? "" : " disabled"}>Reset</button></div>`;
+  menu.classList.remove("hidden");
+  const r = btn.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.left, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${r.bottom + 8}px`;
+  menu.querySelectorAll("[data-f]").forEach((b) => (b.onclick = () => {
+    state[b.dataset.f] = b.dataset.v;
+    menu.querySelectorAll(`[data-f="${b.dataset.f}"]`).forEach((x) => x.classList.toggle("on", x === b));
+    $("#f-reset").disabled = !filterCount();
+    syncFilterButton();
+    renderClipArea();
+  }));
+  $("#f-reset").onclick = () => {
+    state.fLen = state.fSize = state.fDate = "";
+    openFilterMenu(btn);
+    syncFilterButton();
+    renderClipArea();
+  };
+  const fv = $("#f-valorant");
+  if (fv) fv.onchange = async () => {
+    await patchConfig({ valorant_filters: fv.checked });
+    if (!fv.checked) { state.filterMap = state.filterAgent = ""; state.filterKills = 0; }
+    renderTagFilters();
+    renderClipArea();
+  };
+}
+function closeFilterMenu() { const m = $("#filter-menu"); if (m) m.classList.add("hidden"); }
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#filter-menu") && !e.target.closest("#filter-btn")) closeFilterMenu(); });
+main.addEventListener("click", (e) => {
+  const b = e.target.closest("#filter-btn");
+  if (!b) return;
+  if ($("#filter-menu").classList.contains("hidden")) openFilterMenu(b); else closeFilterMenu();
+});
+
 function renderTagFilters() {
   const box = $("#tag-filters");
+  syncFilterButton();
   if (!box) return;
+  if (!valorantFiltersOn()) { box.innerHTML = ""; return; }
   const v = state.view;
   let base = state.lib.clips;
   if (v.name === "game") base = base.filter((c) => c.game === v.game);
@@ -445,8 +555,8 @@ function renderHero() {
   const g = state.lib.games.find((x) => x.name === name);
   if (!hero || !g) return;
   const art = state.art[name] || {};
-  const bg = assetUrl(art.hero) || assetUrl(art.grid);
-  const logo = assetUrl(art.logo);
+  const bg = artSrc(art.hero) || artSrc(art.grid);
+  const logo = artSrc(art.logo);
   hero.innerHTML = `
     <div class="hero-bg" style="${bg ? `background-image:url('${bg}')` : ""}"></div>
     <div class="hero-content">
@@ -461,9 +571,20 @@ function currentClips() {
   if (v.name === "game") list = list.filter((c) => c.game === v.game);
   if (v.name === "favorites") list = list.filter((c) => c.favorite);
   if (v.name === "auto") list = list.filter((c) => c.auto);
-  if (state.filterMap) list = list.filter((c) => c.map === state.filterMap);
+  if (state.filterMap && valorantFiltersOn()) list = list.filter((c) => c.map === state.filterMap);
   if (state.filterAgent) list = list.filter((c) => c.agent === state.filterAgent);
   if (state.filterKills) list = list.filter((c) => (c.kills || 0) >= state.filterKills);
+  if (state.fLen) list = list.filter((c) => c.duration != null && (state.fLen === "short" ? c.duration < 30 : state.fLen === "mid" ? c.duration >= 30 && c.duration <= 120 : c.duration > 120));
+  if (state.fSize) {
+    const mb = (c) => c.size / 1e6;
+    list = list.filter((c) => (state.fSize === "s" ? mb(c) < 50 : state.fSize === "m" ? mb(c) >= 50 && mb(c) <= 200 : mb(c) > 200));
+  }
+  if (state.fDate) {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), state.fDate === "month" ? 1 : now.getDate());
+    if (state.fDate === "week") start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+    list = list.filter((c) => c.t >= start.getTime());
+  }
   const q = state.search.trim().toLowerCase();
   if (q) {
     list = list.filter((c) =>
@@ -543,7 +664,7 @@ function clipCard(c, i, opts) {
     : `<span class="clip-time">${esc(when)}</span>${opts.game ? `<span class="clip-game">${esc(c.game)}</span>` : ""}`)
     + (tags ? `<span class="clip-tags">${esc(tags)}</span>` : "");
   return `
-    <button class="clip${c.favorite ? " is-fav" : ""}${sel.paths.has(c.path) ? " selected" : ""}" data-i="${i}">
+    <button class="clip${c.favorite ? " is-fav" : ""}${sel.paths.has(c.path) ? " selected" : ""}" data-i="${i}" style="--i:${Math.min(i, 10)}">
       <div class="thumb${busyClass(c.path)}" data-path="${esc(c.path)}">
         <img alt="">
         ${busyBadge(c.path)}
@@ -895,8 +1016,60 @@ function animatePage(el = main) {
   el.classList.remove("page-in");
   void el.offsetWidth;
   el.classList.add("page-in");
-  el._pageInTimer = setTimeout(() => el.classList.remove("page-in"), 400);
+  el._pageInTimer = setTimeout(() => el.classList.remove("page-in"), 900);
 }
+
+// ---------- smooth wheel scrolling ----------
+// A mouse wheel's notch glides (240 ms, a quick start and a long soft tail) instead of
+// jumping a block at a time. Trackpads and touch scroll as they are; reduced motion jumps.
+const glideEase = (() => {
+  // cubic-bezier(.23, 1, .32, 1)
+  const [x1, y1, x2, y2] = [0.23, 1, 0.32, 1];
+  const bx = (t) => 3 * x1 * t * (1 - t) ** 2 + 3 * x2 * t * t * (1 - t) + t ** 3;
+  const by = (t) => 3 * y1 * t * (1 - t) ** 2 + 3 * y2 * t * t * (1 - t) + t ** 3;
+  return (x) => {
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 24; i++) { const m = (lo + hi) / 2; if (bx(m) < x) lo = m; else hi = m; }
+    return by((lo + hi) / 2);
+  };
+})();
+const glides = new WeakMap();
+const gliding = new Set(); // elements with a glide running
+function scrollerOf(el) {
+  for (let n = el; n && n !== document.body; n = n.parentElement) {
+    const s = getComputedStyle(n);
+    if (/(auto|scroll)/.test(s.overflowY) && n.scrollHeight > n.clientHeight + 1) return n;
+  }
+  return null;
+}
+window.addEventListener("wheel", (e) => {
+  if (e.defaultPrevented || e.ctrlKey || e.shiftKey || document.body.classList.contains("reduce-motion") || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  // A wheel notch: whole lines, or a big round pixel step. Trackpads send small, uneven ones.
+  const notch = e.deltaMode === 1 || (e.deltaMode === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+  if (!notch || !e.deltaY) return;
+  if (e.target.closest("input, select, textarea, video, [data-wheel]")) return;
+  const el = scrollerOf(e.target);
+  if (!el) return;
+  e.preventDefault();
+  const step = e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
+  const g = glides.get(el);
+  const max = el.scrollHeight - el.clientHeight;
+  const to = Math.max(0, Math.min(max, (g ? g.to : el.scrollTop) + step));
+  const run = { from: el.scrollTop, to, start: performance.now() };
+  glides.set(el, run);
+  gliding.add(el);
+  if (g) return; // the running frame loop picks up the new target
+  const tick = (now) => {
+    const r = glides.get(el);
+    if (!r) return;
+    const t = Math.min(1, (now - r.start) / 240);
+    el.scrollTop = r.from + (r.to - r.from) * glideEase(t);
+    if (t < 1) requestAnimationFrame(tick); else { glides.delete(el); gliding.delete(el); }
+  };
+  requestAnimationFrame(tick);
+}, { passive: false });
+// A press (dragging the scrollbar) stops a glide where it is.
+window.addEventListener("pointerdown", () => { for (const el of gliding) glides.delete(el); gliding.clear(); }, { passive: true });
 
 // ---------- favorites ----------
 
@@ -2725,7 +2898,8 @@ function settingsPane(tab) {
         row("Quick view entrance", "", segB("animation", [["blur", "Blur"], ["dim", "Dim"], ["none", "None"]])),
         d.animation === "blur" ? row("Blur strength", "", rangeB("blur_strength", 10, 100, 5)) : "",
       ])}
-      ${group("Setup", [row("First-time setup", "Go through hotkeys, audio, capture and theme again.", `<button type="button" class="btn" id="set-wizard">Run setup</button>`)])}`;
+      ${group("Library", [row("VALORANT filters everywhere", "Map, agent and kill filters on every page, not just in the VALORANT folder. Also in the Filter menu.", toggle("valorant_filters"))])}
+      ${group("Setup", [row("First-time setup", "Go through what Clipit is for, hotkeys, audio, capture and the look again.", `<button type="button" class="btn" id="set-wizard">Run setup</button>`)])}`;
   }
   if (tab === "recording") {
     const codecs = [["h264", "H.264 · plays everywhere"], ["hevc", "HEVC · smaller"], ["av1", "AV1 · smallest"]].filter(([k]) => info.encoders.some((e) => (k === "h264" ? /h264|x264/ : k === "hevc" ? /hevc|x265/ : /av1/).test(e)));
@@ -3210,6 +3384,18 @@ const upd = { checking: false, checked: false, available: null, installing: fals
 // Shown once, the first time Clipit opens after an update: sections of
 // [title, one line]. Keep it short and plain.
 const WHATS_NEW = {
+  "0.17.0": [
+    ["New", [
+      ["Game art built in", "Covers and icons for 44 popular games show up on their own. No key needed."],
+      ["Filter menu", "Sort any game's clips by length, size and date. VALORANT filters live in the VALORANT folder, or everywhere if you tick them."],
+      ["Folder icons", "Folders without game art get a proper icon."],
+      ["New setup", "A quick welcome that tailors Clipit to how you'll use it. Settings → General → Run setup to try it."],
+    ]],
+    ["Feels better", [
+      ["Smooth scrolling", "The mouse wheel glides instead of jumping."],
+      ["Livelier pages", "Clips arrive one after another and lift softly on hover. Reduce motion turns it off."],
+    ]],
+  ],
   "0.16.0": [
     ["New look", [
       ["A cleaner design", "Neutral colours, a new typeface, big page titles, pill buttons and iOS-style settings."],
@@ -3745,14 +3931,48 @@ const QUALITY_PRESETS = [
   ["1080-30", "1080p · 30 fps", "Smallest files"],
 ];
 
-const wiz = { step: 0, d: null };
+// ---------- first-run setup ----------
+//
+// A short welcome that tailors Clipit to what it's for. Every step has
+// "Skip, use default"; the welcome can also skip the whole thing.
+
+const wiz = { step: 0, d: null, shown: -1 };
+
+// What each answer to "What will you use Clipit for?" means.
+const USES = [
+  ["valorant", "VALORANT", "Kills counted, aces and 3Ks clipped by themselves, map and agent filters.", "valorant"],
+  ["games", "Clipping other games", "One key saves the last moments of any game.", "multi"],
+  ["record", "Recording whole sessions", "A key to start and stop full recordings too.", "record"],
+  ["library", "Just my clip library", "Browse, trim and share clips you already have. No recording.", "folder"],
+];
+
+const WIZ_DEFAULTS = {
+  uses: ["games"],
+  theme_mode: "dark",
+  theme: "tally",
+  window_mode: "both",
+  animation: "blur",
+  clip_hotkey: "Alt+F10",
+  record_hotkey: "Alt+F9",
+  hotkey: "Alt+Z",
+  desktop_audio: true,
+  desktop_device: "",
+  mic: true,
+  mic_device: "",
+  separate_tracks: true,
+  target: "game",
+  replay_secs: 60,
+  preset: "1080-60",
+  autostart: true,
+};
 
 async function openWizard() {
   const cfg = state.config || {};
   const c = cfg.capture || {};
   wiz.step = 0;
+  wiz.shown = -1;
   wiz.d = {
-    record: c.enabled !== false,
+    uses: cfg.uses && cfg.uses.length ? [...cfg.uses] : [],
     clip_hotkey: c.clip_hotkey || "",
     record_hotkey: c.record_hotkey || "",
     hotkey: cfg.hotkey || "Alt+Z",
@@ -3768,89 +3988,182 @@ async function openWizard() {
     clips_root: cfg.clips_root || "",
     theme_mode: cfg.theme_mode || "dark",
     theme: cfg.theme || "tally",
+    window_mode: cfg.window_mode || "both",
+    animation: cfg.animation || "blur",
+    autostart: state.status ? !!state.status.autostart || !cfg.setup_done : true,
   };
+  fillWizardWall();
   $("#wizard").classList.remove("hidden");
   await loadCaptureInfo();
   renderWizard();
 }
 
+// Records clips at all (only "Just my clip library" turns it off).
+const wizRecords = () => !wiz.d.uses.length || wiz.d.uses.some((u) => u !== "library");
+
 function wizSteps() {
-  return wiz.d.record ? ["look", "keys", "audio", "capture", "done"] : ["look", "keys", "capture", "done"];
+  return wizRecords()
+    ? ["welcome", "uses", "look", "popup", "keys", "audio", "capture", "startup", "done"]
+    : ["welcome", "uses", "look", "popup", "keys", "startup", "done"];
+}
+
+// The welcome's backdrop: columns of game covers drifting behind soft moving lights.
+function fillWizardWall() {
+  const wall = $("#wiz-wall");
+  if (!wall || wall.childElementCount) return;
+  builtin.ready.then(() => {
+    const covers = [...new Set([...builtin.map.values()].map((a) => a.grid).filter(Boolean))];
+    if (!covers.length) return;
+    const cols = 7;
+    wall.innerHTML = Array.from({ length: cols }, (_, i) => {
+      const list = covers.filter((_, k) => k % cols === i);
+      const imgs = list.map((src) => `<img src="${src}" alt="" draggable="false">`).join("");
+      return `<div class="wiz-col" style="--d:${36 + (i % 3) * 8}s;--o:${-(i * 7) % 30}s"><div class="wiz-strip${i % 2 ? " up" : ""}">${imgs}${imgs}</div></div>`;
+    }).join("");
+  });
+}
+
+function wizUseIcon(kind) {
+  const b = (slug) => (builtin.map.get(slug) || {}).icon;
+  if (kind === "valorant") return `<span class="use-art"><img src="${b("valorant") || ""}" alt=""></span>`;
+  if (kind === "multi") return `<span class="use-art multi">${["cs2", "fortnite", "minecraft"].map((s) => `<img src="${b(s) || ""}" alt="">`).join("")}</span>`;
+  if (kind === "record") return `<span class="use-art glyph"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3.2" fill="currentColor"/></svg></span>`;
+  return `<span class="use-art glyph">${FOLDER_SVG}</span>`;
+}
+
+// A small live preview of how Clipit appears (the "popup" step).
+function popupPreview(mode, animation) {
+  const hero = (builtin.map.get("valorant") || {}).hero || (builtin.map.get("fortnite") || {}).hero || "";
+  const quick = mode !== "app";
+  return `<div class="pv pv-${quick ? "quick" : "app"} pv-${animation}">
+    <div class="pv-game" style="${hero ? `background-image:url('${hero}')` : ""}"></div>
+    <div class="pv-veil"></div>
+    <div class="pv-win"><i class="pv-side"></i><i class="pv-card"></i><i class="pv-card"></i><i class="pv-card"></i><i class="pv-card"></i></div>
+    <span class="pv-key">${quick ? esc(fmtKey(wiz.d.hotkey || "Alt+Z")) : "Tray"}</span>
+  </div>`;
 }
 
 function renderWizard() {
   const steps = wizSteps();
+  wiz.step = Math.min(wiz.step, steps.length - 1);
   const step = steps[wiz.step];
   const d = wiz.d;
   const info = state.capInfo || { devices: { outputs: [], inputs: [] }, monitors: [] };
-  $("#wiz-dots").innerHTML = steps.map((_, i) => `<span class="${i <= wiz.step ? "on" : ""}"></span>`).join("");
+  const card = $("#wizard .wiz-card");
+  card.classList.toggle("welcome", step === "welcome");
+  $("#wiz-dots").innerHTML = step === "welcome" ? "" : steps.slice(1).map((_, i) => `<span class="${i < wiz.step ? "on" : ""}"></span>`).join("");
+  $("#wiz-count").textContent = step === "welcome" || step === "done" ? "" : `Step ${wiz.step} of ${steps.length - 2}`;
   const body = $("#wiz-body");
   const choice = (key, value, title, text) => `<button type="button" class="choice${d[key] === value ? " on" : ""}" data-k="${key}" data-v="${esc(JSON.stringify(value))}"><b>${title}</b><span>${text}</span></button>`;
-  if (step === "look") {
+  if (step === "welcome") {
     body.innerHTML = `
-      <h2 id="wiz-title">Welcome to Clipit</h2>
-      <p>Save the last minute of any game with one key, then trim and share it. First, pick how it looks.</p>
-      <div class="row-between"><span>Mode</span>${seg("w_mode", [["dark", "Dark"], ["light", "Light"], ["system", "Match Windows"]], d.theme_mode)}</div>
-      <div style="margin-top:12px">${themeCards(d.theme, "data-wtheme")}</div>
-      ${state.status && !state.status.ffmpeg_capture ? `<div class="list" style="margin-top:16px">${ffmpegFixRow()}</div>` : ""}`;
+      <div class="wiz-mark"><svg viewBox="0 0 24 24"><path d="M3 9V6.5A3.5 3.5 0 0 1 6.5 3H9M15 21h2.5a3.5 3.5 0 0 0 3.5-3.5V15"/><circle cx="12" cy="12" r="3.6"/></svg></div>
+      <h2 id="wiz-title" class="wiz-display">Welcome to Clipit</h2>
+      <p class="wiz-lede">Save the best moments of any game with one key, then trim and share them in seconds. A few quick questions and it's ready.</p>
+      <button type="button" class="btn primary wiz-big" id="wiz-start">Get started</button>
+      <button type="button" class="link wiz-all-defaults" id="wiz-all-defaults">Skip setup and use the defaults</button>
+      ${state.status && !state.status.ffmpeg_capture ? `<div class="list wiz-ffmpeg">${ffmpegFixRow()}</div>` : ""}`;
     wireFfmpegButtons(body);
-    // Setup needs ffmpeg: start getting it right away, in the background.
+    // Recording needs ffmpeg: start getting it right away, in the background.
     if (state.status && !state.status.ffmpeg_capture && !ffi.phase) startFfmpegInstall();
+    $("#wiz-start").onclick = () => wizGo(1);
+    $("#wiz-all-defaults").onclick = () => finishWizard(true);
+  } else if (step === "uses") {
+    body.innerHTML = `
+      <h2 id="wiz-title">What will you use Clipit for?</h2>
+      <p>Pick all that fit. Clipit sets itself up around your answer, and you can change anything later.</p>
+      <div class="uses">${USES.map(([id, title, text, art]) => `
+        <button type="button" class="use${d.uses.includes(id) ? " on" : ""}" data-use="${id}" aria-pressed="${d.uses.includes(id)}">
+          ${wizUseIcon(art)}<b>${title}</b><span>${text}</span><i class="use-tick"><svg viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></i>
+        </button>`).join("")}</div>`;
+    body.querySelectorAll("[data-use]").forEach((b) => (b.onclick = () => {
+      const id = b.dataset.use;
+      if (id === "library") d.uses = d.uses.includes("library") ? [] : ["library"];
+      else {
+        d.uses = d.uses.filter((u) => u !== "library");
+        d.uses = d.uses.includes(id) ? d.uses.filter((u) => u !== id) : [...d.uses, id];
+      }
+      if (d.uses.includes("record") && !d.record_hotkey) d.record_hotkey = WIZ_DEFAULTS.record_hotkey;
+      renderWizard();
+    }));
+  } else if (step === "look") {
+    body.innerHTML = `
+      <h2 id="wiz-title">Make it yours</h2>
+      <p>Pick a look. It changes right away.</p>
+      <div class="row-between"><span>Mode</span>${seg("w_mode", [["dark", "Dark"], ["light", "Light"], ["system", "Match Windows"]], d.theme_mode)}</div>
+      <div style="margin-top:12px">${themeCards(d.theme, "data-wtheme")}</div>`;
+  } else if (step === "popup") {
+    body.innerHTML = `
+      <h2 id="wiz-title">How should Clipit pop up?</h2>
+      <p>Over your game with a key, as a normal window, or both.</p>
+      <div class="popups">
+        ${[["both", "Quick view + app", "A key opens Clipit over your game; the tray opens the full window."], ["quick", "Quick view only", "Everything opens over what you're doing."], ["app", "App window only", "A normal window, like any other app."]].map(([v, t, s]) => `
+          <button type="button" class="popup${d.window_mode === v ? " on" : ""}" data-popup="${v}">${popupPreview(v, d.animation)}<b>${t}</b><span>${s}</span></button>`).join("")}
+      </div>
+      ${d.window_mode !== "app" ? `<div class="row-between" style="margin-top:14px"><span>How the quick view appears</span>${seg("w_anim", [["blur", "Blur"], ["dim", "Dim"], ["none", "Instant"]], d.animation)}</div>` : ""}`;
+    body.querySelectorAll("[data-popup]").forEach((b) => (b.onclick = () => { d.window_mode = b.dataset.popup; renderWizard(); }));
   } else if (step === "keys") {
+    const rec = wizRecords();
     body.innerHTML = `
       <h2 id="wiz-title">Pick your hotkeys</h2>
-      <p>Click a key, then press a key (like L or /) or a combination. They work everywhere, even in-game.</p>
-      ${d.record ? `
-        <div class="key-row"><div class="what"><b>Save clip</b><span>Keeps the last moments</span></div>${keyButton("clip_hotkey", d.clip_hotkey)}</div>
-        <div class="key-row"><div class="what"><b>Start or stop recording</b><span>Optional</span></div>${keyButton("record_hotkey", d.record_hotkey)}</div>` : ""}
+      <p>Click a key box, then press a key (like L or /) or a combination. They work everywhere, even in games.</p>
+      ${rec ? `<div class="key-row"><div class="what"><b>Save clip</b><span>Keeps the last moments</span></div>${keyButton("clip_hotkey", d.clip_hotkey)}</div>` : ""}
+      ${rec && d.uses.includes("record") ? `<div class="key-row"><div class="what"><b>Start or stop recording</b><span>Full sessions</span></div>${keyButton("record_hotkey", d.record_hotkey)}</div>` : ""}
       <div class="key-row"><div class="what"><b>Open quick view</b><span>Clipit over whatever you're doing</span></div>${keyButton("hotkey", d.hotkey)}</div>
-      ${d.record ? `<p class="hint">If another app already uses a combination you pick, turn it off there first so it's free.</p>` : ""}
       <p class="hint">${SINGLE_NOTE}</p>`;
     wireKeyButtons(body, (name, value) => { d[name] = value; renderWizardNav(); });
   } else if (step === "audio") {
     body.innerHTML = `
       <h2 id="wiz-title">What should clips sound like?</h2>
-      <p>Both use your Windows default device unless you pick one.</p>
-      <label class="switch"><span><b>Desktop audio</b>: game, music, voice chat</span><input type="checkbox" data-w="desktop_audio" ${d.desktop_audio ? "checked" : ""}></label>
-      <label class="field-col" style="margin:8px 0 16px">Device<select class="select" data-w="desktop_device" ${d.desktop_audio ? "" : "disabled"}>${deviceOptions(info.devices.outputs, d.desktop_device)}</select></label>
-      <label class="switch"><span><b>Microphone</b></span><input type="checkbox" data-w="mic" ${d.mic ? "checked" : ""}></label>
-      <label class="field-col" style="margin:8px 0 16px">Device<select class="select" data-w="mic_device" ${d.mic ? "" : "disabled"}>${deviceOptions(info.devices.inputs, d.mic_device)}</select></label>
-      <label class="switch"><span>Save desktop and mic as separate tracks too (for video editing)</span><input type="checkbox" data-w="separate_tracks" ${d.separate_tracks ? "checked" : ""}></label>`;
+      <p>Both follow your Windows default device unless you pick one.</p>
+      <div class="list">
+        ${row("Game and desktop sound", "Game, music, voice chat", `<label class="switch"><input type="checkbox" data-w="desktop_audio" ${d.desktop_audio ? "checked" : ""}></label>`)}
+        ${d.desktop_audio ? row("Device", "", `<select class="select" data-w="desktop_device">${deviceOptions(info.devices.outputs, d.desktop_device)}</select>`, "indent") : ""}
+        ${row("Microphone", "", `<label class="switch"><input type="checkbox" data-w="mic" ${d.mic ? "checked" : ""}></label>`)}
+        ${d.mic ? row("Device", "", `<select class="select" data-w="mic_device">${deviceOptions(info.devices.inputs, d.mic_device)}</select>`, "indent") : ""}
+        ${row("Separate tracks too", "Desktop and mic on their own tracks, for video editing", `<label class="switch"><input type="checkbox" data-w="separate_tracks" ${d.separate_tracks ? "checked" : ""}></label>`)}
+      </div>`;
   } else if (step === "capture") {
     body.innerHTML = `
       <h2 id="wiz-title">Recording</h2>
-      <label class="switch"><span><b>Record clips with Clipit</b><br><span class="muted" style="font-size:12px">Off: Clipit only shows clips that are already in your folder.</span></span><input type="checkbox" data-w="record" ${d.record ? "checked" : ""}></label>
-      ${d.record ? `
-        <div class="choices" style="margin-top:16px">
-          ${choice("target", "game", "Game window only", "Just the game. Nothing runs until a game is in focus.")}
-          ${choice("target", "monitor", "Whole monitor", "Everything on one screen.")}
-        </div>
-        ${d.target === "monitor" ? `<label class="field-col" style="margin-top:12px">Monitor<select class="select" data-w="monitor">${info.monitors.map((m) => `<option value="${esc(m.id)}"${m.id === d.monitor || (!d.monitor && m.primary) ? " selected" : ""}>${esc(m.label)}</option>`).join("")}</select></label>` : ""}
-        <div class="row-between" style="margin-top:16px"><span>Replay length</span>${seg("w_replay", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], d.replay_secs)}</div>
-        <label class="field-col">Quality<select class="select" data-w="preset">${QUALITY_PRESETS.map(([v, l, t]) => `<option value="${v}"${v === d.preset ? " selected" : ""}>${l}, ${t}</option>`).join("")}</select></label>
-        <p class="hint" id="wiz-ram"></p>` : ""}
-      <label class="field-col" style="margin-top:16px">Clips folder
+      <p>What to capture and how long the replay is.</p>
+      <div class="choices two">
+        ${choice("target", "game", "Game window only", "Just the game. Nothing runs until a game is in focus.")}
+        ${choice("target", "monitor", "Whole monitor", "Everything on one screen.")}
+      </div>
+      ${d.target === "monitor" ? `<label class="field-col" style="margin-top:12px">Monitor<select class="select" data-w="monitor">${info.monitors.map((m) => `<option value="${esc(m.id)}"${m.id === d.monitor || (!d.monitor && m.primary) ? " selected" : ""}>${esc(m.label)}</option>`).join("")}</select></label>` : ""}
+      <div class="row-between" style="margin-top:16px"><span>Replay length</span>${seg("w_replay", [[30, "30 s"], [60, "1 min"], [120, "2 min"], [300, "5 min"]], d.replay_secs)}</div>
+      <label class="field-col">Quality<select class="select" data-w="preset">${QUALITY_PRESETS.map(([v, l, t]) => `<option value="${v}"${v === d.preset ? " selected" : ""}>${l}, ${t}</option>`).join("")}</select></label>
+      <p class="hint" id="wiz-ram"></p>
+      <label class="field-col" style="margin-top:12px">Clips folder
         <span class="field"><input type="text" data-w="clips_root" value="${esc(d.clips_root)}" spellcheck="false"><button type="button" class="btn" id="wiz-browse">Browse</button></span>
-      </label>
-      <p class="hint">Each game gets its own sub-folder.</p>`;
+      </label>`;
     $("#wiz-browse").onclick = async () => {
       try {
         const p = await invoke("pick_folder", { title: "Choose your clips folder" });
         if (p) { d.clips_root = p; renderWizard(); }
       } catch (e) { toast(String(e), true); }
     };
-  } else {
-    const keys = [d.clip_hotkey && d.record ? `<kbd>${esc(fmtKey(d.clip_hotkey))}</kbd> saves a clip` : "", d.record_hotkey && d.record ? `<kbd>${esc(fmtKey(d.record_hotkey))}</kbd> starts or stops recording` : "", `<kbd>${esc(fmtKey(d.hotkey))}</kbd> opens the quick view`].filter(Boolean);
+  } else if (step === "startup") {
     body.innerHTML = `
-      <h2 id="wiz-title">You're set</h2>
-      <p>${d.record ? "Clipit keeps the last moments ready whenever you play." : "Clipit will show the clips in your folder."}</p>
-      <ul class="wiz-facts">${keys.map((k) => `<li>${k}</li>`).join("")}<li>Everything here can be changed later in Settings</li></ul>`;
+      <h2 id="wiz-title">Start with Windows?</h2>
+      <p>Clipit starts quietly in the tray when you sign in, so your clip key works the moment you open a game.</p>
+      <div class="choices two">
+        ${choice("autostart", true, "Yes, start with Windows", "Recommended. It uses almost nothing until a game runs.")}
+        ${choice("autostart", false, "No, I'll open it myself", "Clips are only saved while Clipit is open.")}
+      </div>`;
+  } else {
+    const rec = wizRecords();
+    const keys = [rec && d.clip_hotkey ? `<kbd>${esc(fmtKey(d.clip_hotkey))}</kbd> saves a clip` : "", rec && d.uses.includes("record") && d.record_hotkey ? `<kbd>${esc(fmtKey(d.record_hotkey))}</kbd> starts or stops recording` : "", d.window_mode !== "app" ? `<kbd>${esc(fmtKey(d.hotkey))}</kbd> opens the quick view` : ""].filter(Boolean);
+    body.innerHTML = `
+      <h2 id="wiz-title" class="wiz-display">You're all set</h2>
+      <p>${rec ? "Clipit keeps the last moments ready whenever you play." : "Clipit will show the clips in your folder."}${d.uses.includes("valorant") ? " VALORANT kills are counted and your best rounds are clipped by themselves." : ""}</p>
+      <ul class="wiz-facts">${keys.map((k) => `<li>${k}</li>`).join("")}<li>Everything can be changed later in Settings</li></ul>`;
   }
   body.querySelectorAll(".choice").forEach((b) => (b.onclick = () => { d[b.dataset.k] = JSON.parse(b.dataset.v); renderWizard(); }));
   body.querySelectorAll("[data-w]").forEach((el) => {
     const update = () => {
       d[el.dataset.w] = el.type === "checkbox" ? el.checked : el.value;
-      if (el.dataset.w === "record") wiz.step = wizSteps().indexOf("capture");
       if (el.type === "checkbox") renderWizard();
       else { updateWizRam(); renderWizardNav(); }
     };
@@ -3858,10 +4171,20 @@ function renderWizard() {
   });
   body.querySelectorAll("[data-seg]").forEach((g) => g.querySelectorAll("button").forEach((b) => (b.onclick = () => {
     if (g.dataset.seg === "w_mode") { d.theme_mode = b.dataset.v; applyTheme(d.theme_mode, d.theme); }
+    else if (g.dataset.seg === "w_anim") d.animation = b.dataset.v;
     else d.replay_secs = Number(b.dataset.v);
     renderWizard();
   })));
   body.querySelectorAll("[data-wtheme]").forEach((b) => (b.onclick = () => { d.theme = b.dataset.wtheme; applyTheme(d.theme_mode, d.theme); renderWizard(); }));
+  // A new step comes in (once); changing an option on the same step just updates it.
+  if (wiz.shown !== wiz.step) {
+    wiz.shown = wiz.step;
+    body.classList.remove("enter");
+    void body.offsetWidth;
+    body.classList.add("enter");
+    clearTimeout(body._enterTimer);
+    body._enterTimer = setTimeout(() => body.classList.remove("enter"), 900);
+  }
   updateWizRam();
   renderWizardNav();
 }
@@ -3880,38 +4203,94 @@ function updateWizRam() {
 function renderWizardNav() {
   const steps = wizSteps();
   const step = steps[wiz.step];
-  $("#wiz-back").style.visibility = wiz.step === 0 ? "hidden" : "visible";
-  const last = wiz.step === steps.length - 1;
-  $("#wiz-next").textContent = last ? "Finish" : "Next";
-  const needKey = step === "keys" && wiz.d.record && !wiz.d.clip_hotkey;
+  const nav = $("#wizard .wiz-nav");
+  nav.classList.toggle("hidden", step === "welcome");
+  $("#wiz-back").style.visibility = wiz.step <= 1 ? "hidden" : "visible";
+  $("#wiz-skip").style.visibility = step === "done" ? "hidden" : "visible";
+  const last = step === "done";
+  $("#wiz-next").textContent = last ? "Start clipping" : "Continue";
+  $("#wiz-next").classList.toggle("wiz-big", last);
+  const needKey = step === "keys" && wizRecords() && !wiz.d.clip_hotkey;
   const needFolder = step === "capture" && !wiz.d.clips_root.trim();
-  $("#wiz-next").disabled = needKey || needFolder;
-  $("#wiz-next").title = needKey ? "Pick a key for saving clips first" : needFolder ? "Choose a clips folder" : "";
+  const needUse = step === "uses" && !wiz.d.uses.length;
+  $("#wiz-next").disabled = needKey || needFolder || needUse;
+  $("#wiz-next").title = needKey ? "Pick a key for saving clips, or skip to use the default" : needFolder ? "Choose a clips folder" : needUse ? "Pick at least one, or skip" : "";
 }
 
-$("#wiz-back").onclick = () => { if (wiz.step > 0) { wiz.step--; renderWizard(); } };
-$("#wiz-next").onclick = async () => {
-  if (keyCaptureActive) return;
-  const steps = wizSteps();
-  if (wiz.step < steps.length - 1) { wiz.step++; renderWizard(); return; }
+function wizGo(step) {
+  wiz.step = Math.max(0, Math.min(step, wizSteps().length - 1));
+  renderWizard();
+}
+
+// "Skip, use default": this step's defaults, then on.
+function wizSkip() {
   const d = wiz.d;
-  const cap = d.record ? {
-    enabled: true, clip_hotkey: d.clip_hotkey, record_hotkey: d.record_hotkey,
+  const step = wizSteps()[wiz.step];
+  const D = WIZ_DEFAULTS;
+  if (step === "uses") d.uses = [...D.uses];
+  if (step === "look") { d.theme_mode = D.theme_mode; d.theme = D.theme; applyTheme(d.theme_mode, d.theme); }
+  if (step === "popup") { d.window_mode = D.window_mode; d.animation = D.animation; }
+  if (step === "keys") {
+    d.clip_hotkey = d.clip_hotkey || D.clip_hotkey;
+    d.hotkey = d.hotkey || D.hotkey;
+    if (d.uses.includes("record")) d.record_hotkey = d.record_hotkey || D.record_hotkey;
+  }
+  if (step === "audio") Object.assign(d, { desktop_audio: D.desktop_audio, desktop_device: "", mic: D.mic, mic_device: "", separate_tracks: D.separate_tracks });
+  if (step === "capture") {
+    Object.assign(d, { target: D.target, replay_secs: D.replay_secs, preset: D.preset });
+    if (!d.clips_root.trim()) d.clips_root = (state.config && state.config.clips_root) || "";
+  }
+  if (step === "startup") d.autostart = D.autostart;
+  if (wiz.step >= wizSteps().length - 1) return finishWizard(false);
+  wizGo(wiz.step + 1);
+}
+
+$("#wiz-back").onclick = () => { if (wiz.step > 1) wizGo(wiz.step - 1); };
+$("#wiz-skip").onclick = () => wizSkip();
+$("#wiz-next").onclick = () => {
+  if (keyCaptureActive) return;
+  if (wiz.step < wizSteps().length - 1) return wizGo(wiz.step + 1);
+  finishWizard(false);
+};
+
+async function finishWizard(allDefaults) {
+  const d = wiz.d;
+  if (allDefaults) {
+    const keep = { clips_root: d.clips_root, monitor: d.monitor };
+    Object.assign(d, { ...WIZ_DEFAULTS, uses: [...WIZ_DEFAULTS.uses] }, keep);
+    applyTheme(d.theme_mode, d.theme);
+  }
+  if (!d.uses.length) d.uses = [...WIZ_DEFAULTS.uses];
+  const rec = wizRecords();
+  if (rec && !d.clip_hotkey) d.clip_hotkey = WIZ_DEFAULTS.clip_hotkey;
+  const valorant = d.uses.includes("valorant");
+  const cap = rec ? {
+    enabled: true, clip_hotkey: d.clip_hotkey, record_hotkey: d.uses.includes("record") ? d.record_hotkey : (state.config.capture.record_hotkey || ""),
     desktop_audio: d.desktop_audio, desktop_device: d.desktop_device, mic: d.mic, mic_device: d.mic_device,
     separate_tracks: d.separate_tracks, target: d.target, monitor: d.monitor, ...wizCaptureDraft(),
+    auto_clip_kills: valorant, count_kills: true,
   } : { enabled: false };
-  const rootChanged = state.config && state.config.clips_root !== d.clips_root.trim();
-  if (await patchConfig({ setup_done: true, hotkey: d.hotkey || "Alt+Z", theme_mode: d.theme_mode, theme: d.theme, clips_root: d.clips_root.trim(), capture: cap })) {
-    $("#wizard").classList.add("hidden");
+  const root = (d.clips_root || state.config.clips_root || "").trim();
+  const rootChanged = state.config && state.config.clips_root !== root;
+  const patch = {
+    setup_done: true, uses: d.uses, valorant_filters: valorant, hotkey: d.hotkey || "Alt+Z", theme_mode: d.theme_mode, theme: d.theme,
+    window_mode: d.window_mode, animation: d.animation, clips_root: root, capture: cap,
+  };
+  if (await patchConfig(patch)) {
+    try { await invoke("set_autostart", { enabled: !!d.autostart }); } catch {}
+    $("#wizard").classList.add("closing");
+    setTimeout(() => $("#wizard").classList.add("hidden"), document.body.classList.contains("reduce-motion") ? 0 : 320);
+    setTimeout(() => $("#wizard").classList.remove("closing"), 400);
     applySavedTheme();
     const failed = [state.status.hotkey, state.status.clip_hotkey, state.status.record_hotkey].find((h) => h && h.hotkey && !h.registered);
     toast(failed ? `${fmtKey(failed.hotkey)} is taken by another app. Pick another in Settings.` : "All set", !!failed);
     pollCapture();
-    if (rootChanged) { await loadLibrary(); renderSidebar(); render(); }
+    if (rootChanged) { await loadLibrary(); renderSidebar(); }
+    render();
     if (state.view.name === "settings") { setUI.draft = null; rerenderSettings(); }
     if (ffi.phase === "done") restartForFfmpeg();
   }
-};
+}
 
 // ---------- live updates ----------
 

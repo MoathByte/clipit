@@ -33,6 +33,10 @@ pub struct Config {
     pub auto_update: bool,
     /// Fewer animations inside the app (Windows' "Animation effects" off counts too).
     pub reduce_motion: bool,
+    /// Show the VALORANT filters (map, agent, kills) on every page, not just in the VALORANT folder.
+    pub valorant_filters: bool,
+    /// What the first-run setup was told Clipit is for ("valorant", "games", "record", "library").
+    pub uses: Vec<String>,
     pub capture: Capture,
     /// Work done while the PC is idle: kill marks for older clips, compression.
     pub background: Background,
@@ -90,6 +94,8 @@ impl Default for Config {
             theme: "tally".into(),
             auto_update: true,
             reduce_motion: false,
+            valorant_filters: false,
+            uses: Vec::new(),
             capture: Capture::default(),
             background: Background::default(),
         }

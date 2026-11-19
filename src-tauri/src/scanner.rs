@@ -32,6 +32,8 @@ pub struct Clip {
     pub auto: bool,
     /// Seconds into the clip where your kills happen, once read.
     pub kill_times: Option<Vec<f32>>,
+    /// Length in seconds (read from the file's header; None if it couldn't be).
+    pub duration: Option<f64>,
 }
 
 /// Paths Clipit keeps per-clip flags for.
@@ -141,7 +143,9 @@ pub fn clip_from(path: &Path, game: &str, flags: &Flags) -> Option<Clip> {
         .unwrap_or(0);
     let path_str = path.to_string_lossy().into_owned();
     let info = crate::library::ClipMeta::get_in(flags.meta, &path_str);
+    let duration = crate::media::duration_cached(path, meta.len(), modified_ms);
     Some(Clip {
+        duration,
         kills: info.kills,
         map: info.map,
         agent: info.agent,
